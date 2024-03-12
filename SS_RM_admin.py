@@ -20,6 +20,10 @@ class SmartsheetRmAdmin():
         self.smart.errors_as_exceptions(True)
         self.start_time = time.time()
         self.log=ghetto_logger("SS_RM_admin.py")
+        self.rm_header = {
+            'Content-Type': 'application/json',
+            'auth': self.rm_token
+        }
     #region helpers
     def apply_config(self, config):
         '''turns all config items into self.key = value'''
@@ -38,12 +42,7 @@ class SmartsheetRmAdmin():
     #region Time & Expense
     def grab_rm_userids(self):
         '''grabs each user's id, this will help with allocating hours to users correctly'''
-        headers = {
-            'Content-Type': 'application/json',
-            'auth': self.rm_token
-        }
-
-        response = requests.get('https://api.rm.smartsheet.com/api/v1/users', headers=headers)
+        response = requests.get('https://api.rm.smartsheet.com/api/v1/users', headers=self.rm_header)
 
         response_dict = response.json()
 
@@ -54,12 +53,7 @@ class SmartsheetRmAdmin():
             self.sageid_to_email[user['employee_number']] = user['email'].lower()
     def grab_rm_projids(self):
         '''grabs each project's id from RM in SS'''
-        headers = {
-            'Content-Type': 'application/json',
-            'auth': self.rm_token
-        }
-
-        response = requests.get('https://api.rm.smartsheet.com/api/v1/projects?sort_field=created&sort_order=ascending', headers=headers)
+        response = requests.get('https://api.rm.smartsheet.com/api/v1/projects?sort_field=created&sort_order=ascending', headers=self.rm_header)
 
         response_dict = response.json()
 
@@ -83,16 +77,11 @@ class SmartsheetRmAdmin():
     def post_user_emplnum(self):
         '''updates employee to have employee number'''
         for user in self.needs_emplnum_update:
-            headers = {
-                'Content-Type': 'application/json',
-                'auth': self.rm_token
-            }
-
             data = {
                 'employee_number': self.sage_id_dict[user['email'].lower()]
             }
 
-            response = requests.put(f"https://api.rm.smartsheet.com/api/v1/users/{user['rm_usr_id']}", headers=headers, data=json.dumps(data))
+            response = requests.put(f"https://api.rm.smartsheet.com/api/v1/users/{user['rm_usr_id']}", headers=self.rm_header, data=json.dumps(data))
 
             if response.status_code == 200:
                 self.log.log(f"Added EmpployeeNumber to {user['name']}'s user data")
@@ -214,37 +203,105 @@ class SmartsheetRmAdmin():
             meta_data = {sum_field['title']: sum_field['displayValue'] for sum_field in self.parent_data if sum_field['title'] in ['Project Enumerator [MANUAL ENTRY]', 'DCT Status', 'Build Region', 'Build Job Number', 'Build Architect']}
             self.ss_proj_list[sheet_i]['meta_data'] = meta_data
     def get_rmproj_metadata(self, proj):
-        '''checks connected projects for sync of meta data, and compares. If out of sync, sounds to api call'''
+        '''checks connected projects for sync of meta data (checking standard, and non standard Arch and Proj Enum fields seperatly), and compares. If out of sync, sounds to api call'''
         url = f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}"
-        headers = {
-            'Content-Type': 'application/json',
-            'auth': self.rm_token
-        }
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            rm_meta_data= {'proj_status':response.json()['tags']['data'][0]['value'], 'job_num':response.json()['project_code'], "region":response.json()['client']}
+        standard_response = requests.get(url, headers=self.rm_header)
+        custom_response = requests.get(url+"/custom_field_values", headers=self.rm_header)
 
-            if not rm_meta_data['proj_status'] == proj['meta_data']['DCT Status'] and rm_meta_data['job_num'] == proj['meta_data']['Build Job Number'] and rm_meta_data['region'] == proj['meta_data']['Build Region']:
-                self.update_rm_proj(self, rm_meta_data, proj)
+        if standard_response.status_code == 200 and custom_response.status_code == 200 :
+            arch, arch_id, enum, enum_id = '', '', '', ''
+            for data_field in custom_response.json()['data']:
+                if data_field['custom_field_name'] == "Architect":
+                    arch = data_field['value'] 
+                    arch_id = data_field['id']
+                elif data_field['custom_field_name'] == "Project Enumerator":
+                    enum = data_field['value'] 
+                    enum_id = data_field['id']
+
+            rm_proj_metadata= {
+                'proj_status':standard_response.json()['tags']['data'][0]['value'], 
+                'proj_status_rm_id':standard_response.json()['tags']['data'][0]['id'],
+                'job_num':standard_response.json()['project_code'], 
+                "region":standard_response.json()['client'],
+                "custom_fields":[
+                    {'type': 'arch',
+                    'value':arch,
+                    'rm_id':arch_id},
+                    {'type': 'enum',
+                    'value':enum,
+                    'rm_id':enum_id}                   
+                ]}
+            
+            return rm_proj_metadata
 
         else:
             self.log.log(f"{proj['name']} could not be found on RM")
-
-    def update_rm_proj(self, rm_meta_data, proj):
-        '''EDIT updates employee to have employee number'''
-        headers = {
-            'Content-Type': 'application/json',
-            'auth': self.rm_token
-        }
+            return {'message':'error retrieving rm_proj_metadata for updating project meta data'}
+        # region updating project meta data
+    def execute_conditional_rm_proj_update(self, rm_proj_metadata, proj):
+        '''checks for various types of project meta data that has been found to be out of sync.
+        standard data fields, tags, and custom data fields each have a different method to update'''
+        if not(rm_proj_metadata['job_num'] == proj['meta_data']['Build Job Number'] and rm_proj_metadata['region'] == proj['meta_data']['Build Region']):
+            self. update_rm_proj_standfields(rm_proj_metadata, proj)
+        if not(rm_proj_metadata['custom_fields'][0]['value'] == proj['meta_data']['Build Architect'] and rm_proj_metadata['custom_fields'][1]['value'] == proj['meta_data']['Project Enumerator [MANUAL ENTRY]']):
+            self.update_rm_proj_customfields(rm_proj_metadata, proj)
+        if not(rm_proj_metadata['proj_status'] == proj['meta_data']['DCT Status']):
+            self.update_rm_proj_tagsfield(rm_proj_metadata, proj)
+    def update_rm_proj_standfields(self, rm_proj_metadata, proj):
+        '''updates project meta data that has been found to be out of sync.
+        standard data fields, tags, and custom data fields each have a different method to update'''
+        # standard fields
         data = {
             'id':proj['rm_id'],
-            'project_code':rm_meta_data['job_num'],
-            'region':rm_meta_data['region'],
+            'project_code':proj['meta_data']['Build Job Number'],
+            'region':proj['meta_data']['Build Region'],
         }
-        response = requests.put(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}", headers=headers, data=json.dumps(data))
+        response = requests.put(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}", headers=self.rm_header, data=json.dumps(data))
+
         if response.status_code == 200:
             self.log.log(f"Updated {proj['name']}'s meta data")
-        response_dict = response.json()
+    def update_rm_proj_tagsfield(self, rm_proj_metadata, proj):
+        '''updates project meta data that has been found to be out of sync.
+        standard data fields, tags, and custom data fields each have a different method to update
+        tags have no put, so old one needs to be deleted, and new one added'''
+        delete_response = requests.delete(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}/tags/{rm_proj_metadata['proj_status_rm_id']}", headers=self.rm_header)
+        # tags field
+        
+        if delete_response.status_cude == 200:
+            data = {
+                'id':proj['rm_id'],
+                'value':proj['meta_data']['DCT Status']
+            }
+            post_response = requests.post(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}/tags", headers=self.rm_header, data=json.dumps(data))
+
+            if post_response.status_code == 200:
+                self.log.log(f"Updated {proj['name']}'s meta data")
+            else:
+                self.log.log(f"Successfully deleted {proj['name']}'s tag, but did not succeed to add the new one, therefore the project currently has no Proj Status")
+        else:
+            self.log.log(f"failed to delete {proj['name']}'s tag and therefore did not attempt to add the new tag, so tags are still out of sync")
+    def update_rm_proj_customfields(self, rm_proj_metadata,proj):
+        '''updates project meta data that has been found to be out of sync.
+        standard data fields, tags, and custom data fields each have a different method to update'''
+        for custom_field in rm_proj_metadata['custom_fields']:
+            value = ''
+            if custom_field['type'] == 'arch':
+                value = proj['meta_data']['Build Architect']
+            elif custom_field['type'] == 'enum':
+                value = proj['meta_data']['Project Enumerator [MANUAL ENTRY]']
+            else:
+                self.log.log('failed to post custom field updates, system could not find the fields in its meta data')
+            print(proj['rm_id'], custom_field['rm_id'], custom_field)
+            self.response = requests.put(
+                f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}/custom_field_values/{custom_field['rm_id']}", 
+                headers=self.rm_header, 
+                data=json.dumps({'value':value}))
+            
+            if self.response.json().get('message') != "not found":
+                self.log.log(f"{proj['name']} updated its custom fields")
+            else:
+                self.log.log(f"{proj['name']} failed to update its custom fields")
+        #endregion
     #endregion
 
 
@@ -266,7 +323,12 @@ class SmartsheetRmAdmin():
             self.update_sheet_name(proj)
             if proj['status'] == 'connected':
                 self.grab_connected_sheet_data(proj_i, proj)
-                self.get_rmproj_metadata(proj)
+                rm_proj_metadata = self.get_rmproj_metadata(proj)
+                # try:
+                self.execute_conditional_rm_proj_update(rm_proj_metadata, proj)
+                # except:
+                #     self.log.log('issues locating the proj metadata resulted in failed update')
+
 
 if __name__ == "__main__":
     # https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid is hh2 data sheet
