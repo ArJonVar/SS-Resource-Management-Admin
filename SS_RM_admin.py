@@ -199,19 +199,19 @@ class SmartsheetRmAdmin():
         try:
             updated_sheet = self.smart.Sheets.update_sheet(
             # sheet id
-            sheet_info['ss_id'], 
+            sheet_info['ss_sheet_id'], 
             # new name
             smartsheet.models.Sheet({
                 'name': new_name}))
         except Exception as e:
-            self.log.log(f"Error updating sheet anme: {e}")
+            self.log.log(f"Error updating sheet name: {e}")
     def grab_connected_sheet_data(self, sheet_i, sheet_info):
         '''if the sheet is connected, grab the nessisary data'''
         if sheet_info['status'] == "connected":
             sheet = grid(sheet_info['ss_sheet_id'])
             sheet.fetch_summary_content()
-            parent_data= sheet.df.to_dict('records')[0]
-            meta_data = {key: value for key, value in parent_data.items() if key in ['Project Enumerator [MANUAL ENTRY]', 'DCT Status', 'Build Region', 'Build Job Number', 'Build Architect']}
+            self.parent_data= sheet.df.to_dict('records')
+            meta_data = {sum_field['title']: sum_field['displayValue'] for sum_field in self.parent_data if sum_field['title'] in ['Project Enumerator [MANUAL ENTRY]', 'DCT Status', 'Build Region', 'Build Job Number', 'Build Architect']}
             self.ss_proj_list[sheet_i]['meta_data'] = meta_data
     def get_rmproj_metadata(self, proj):
         '''checks connected projects for sync of meta data, and compares. If out of sync, sounds to api call'''
