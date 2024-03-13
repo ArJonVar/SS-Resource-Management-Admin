@@ -303,8 +303,9 @@ class SmartsheetRmAdmin():
                 data=json.dumps(data))
             if result.json().get('errors'):
                 self.api_error_messages_instance += 1
-                if result.json().get('errors') not in self.api_error_messages:
-                    self.api_error_messages.extend(result.json().get('errors'))
+                for error in result.json().get('errors'):
+                    if error not in self.api_error_messages:
+                        self.api_error_messages.append(error)
             return result.status_code == 200
         else:
             if timeentry['job_num'] not in self.undeployed_job_nums:
@@ -484,7 +485,6 @@ class SmartsheetRmAdmin():
         self.process_timedata_discrepencies()
         self.post_time_changes()
         grid(self.hh2_data_sheetid).handle_update_stamps()
-
     def run_proj_metadata_update(self):
         '''katherine has mapped particular columns of her project template to meta data fields in RM, this script keeps it up to date'''
         self.log.log("""Project Metadata Updates:
