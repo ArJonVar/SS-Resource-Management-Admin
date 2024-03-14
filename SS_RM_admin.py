@@ -24,6 +24,7 @@ class SmartsheetRmAdmin():
             'Content-Type': 'application/json',
             'auth': self.rm_token
         }
+        self.post_to_hh2_on_ss = []
         self.base_url='https://api.rm.smartsheet.com'
     #region helpers
     def apply_config(self, config):
@@ -33,11 +34,17 @@ class SmartsheetRmAdmin():
     def validate_and_contains_first_row(self, dataframe):
         '''Checks if all columns have the words from the first row (minus the last, which is row ids)
         this is important because that match represents that the data DCT pastes in matches what this script is expecting to see'''
+        correct_columns = []
+        incorrect_columns = []
         for i in range(len(dataframe.columns)-1):
             # Check if the value of each cell in the first row is contained within the corresponding column name
-            if str(dataframe.iloc[0, i]) not in dataframe.columns[i]:
-                return False  # If any cell is not contained, return False
-        return True  # If all cells are contained, return True
+            if str(dataframe.iloc[0, i]) in dataframe.columns[i]:
+                correct_columns.append(str(dataframe.iloc[0, i]))
+            # check each column to make sure it is in the correct columns list, otherwise it is missing and therefore wrong
+        for column in dataframe.columns.tolist():
+            if column !='id' and column not in correct_columns:
+                incorrect_columns.append(column)
+        return incorrect_columns  # If all cells are contained, return True
     def paginated_rm_getrequest(self, endpoint, params=None):
         """
         Fetches data from an API endpoint. Handles both single item and paginated responses.
@@ -140,14 +147,18 @@ class SmartsheetRmAdmin():
         sheet = grid(self.hh2_data_sheetid)
         sheet.fetch_content()
         df = sheet.df
+        df = df.drop(['Script Message', 'Key', 'Message Repeater'], axis=1)
 
-        if not self.validate_and_contains_first_row(df):
-            error = "First row validation failed. Please check data."
+        invalid_column_list = self.validate_and_contains_first_row(df)
+
+        if invalid_column_list == []:
+            df = self.clean_df_for_processing(df)
+            self.flat_hh2_records = self.aggregate_hh2_data(df)
+        else: 
+            error = f"First row validation failed (so script did not run properly). Please check {invalid_column_list} columns."
+            self.post_to_hh2_on_ss = {'id':sheet.df['id'][0], 'value':error}
             self.log.log(error)
-            return None  # Early return to avoid further processing
-
-        df = self.clean_df_for_processing(df)
-        self.flat_hh2_records = self.aggregate_hh2_data(df)
+            return None  # Return to avoid further processing
     def clean_df_for_processing(self, df):
         '''cleans incoming hh2 data from smartsheet'''
         df.drop(index=df.index[0], inplace=True)
@@ -156,11 +167,11 @@ class SmartsheetRmAdmin():
         df['Description'] = df['Description'].astype(str)
         df['Units'] = pd.to_numeric(df['Units'], errors='coerce')
         return df
-    def aggregate_hh2_data(self, df):
+    def aggregate_hh2_dataOLD(self, df):
         '''filteres by approval type, then turns the df into a dict w recrds, 
         making sure to add all units incase there are two entries for the same day/job number'''
         # Chat GPT helped me with this to make it run faster:
-        grouped = df[df['ApprovalType'] == 'Submitted'].groupby(
+        grouped = df[df['ApprovalType'] == 'Sealed'].groupby(
         ['Job', 'Date', 'EmployeeNumber', 'CostCodeName']
         ).agg({
             'Units': 'sum',
@@ -180,6 +191,7 @@ class SmartsheetRmAdmin():
         
         # Directly construct the records without explicit row iteration
         records = grouped.to_dict('records')
+        self.records = records
         
         # Transform records into desired format
         flat_hh2_records = [{
@@ -190,10 +202,53 @@ class SmartsheetRmAdmin():
             "date": record['date'],
             "hours": record['Units'],
             "task": record['CostCodeName'],
-            "notes": record['Description']
+            "notes": record['Description'],
+            "ss_row_id": record['id']
         } for record in records]
     
         return flat_hh2_records
+    def aggregate_hh2_data(self, df):
+        # Assuming df is your DataFrame
+        # Filter the DataFrame to keep only rows where ApprovalType is 'Sealed' or 'Submitted'
+        filtered_df = df[df['ApprovalType'].isin(['Sealed'])].copy()
+
+        filtered_df['Date'] = pd.to_datetime(filtered_df['Date'])
+        filtered_df['Description'] = filtered_df['Description'].astype(str)
+        filtered_df['Units'] = pd.to_numeric(filtered_df['Units'], errors='coerce')
+
+        # Simplify DataFrame to only keep necessary columns
+        simplified_df = filtered_df[['Job', 'Date', 'EmployeeNumber', 'Description', 'CostCodeName', 'Units', 'id']].copy()
+        self.debug = simplified_df
+
+        simplified_df['user'] = simplified_df['EmployeeNumber'].map(self.sageid_to_email).fillna('default_email@example.com')
+        simplified_df['date'] = simplified_df['Date'].dt.date.astype(str)  # Ensuring date format
+        simplified_df['rm_user_id'] = simplified_df['user'].apply(lambda x: self.email_to_userid.get(x.lower()))
+        simplified_df['rm_proj_id'] = simplified_df['Job'].apply(lambda x: self.jobnum_to_rm_id.get(x, ''))
+
+        # Calculate min and max dates if needed
+        self.min_date = simplified_df['date'].min()
+        self.max_date = simplified_df['date'].max()
+
+        # Directly construct the records without explicit row iteration
+        records = simplified_df.to_dict('records')
+        self.records = records
+
+        # Transform records into the desired format
+        flat_hh2_records = [{
+            "user_email": record['user'],
+            "rm_userid": record['rm_user_id'],
+            "job_num": record['Job'],
+            'rm_proj_id': record['rm_proj_id'],
+            "date": record['date'],
+            "hours": record['Units'],
+            "task": record['CostCodeName'],
+            "notes": record.get('Description'),
+            "ss_row_id": record['id'],
+            "messages": []
+        } for record in records]
+
+        return flat_hh2_records
+
     def grab_rm_timedata(self):
         '''grabs existing data from rm, translates rm job id to job number, rm user id to user email, 
         and then builds out a reference dictionary of time entries (hrs) for verifying if update is needed, adding hours for same job/time as needed
@@ -244,7 +299,6 @@ class SmartsheetRmAdmin():
     {to_add_projntime} entries that first need project added, then time added""")
     def post_time_changes(self):
         'processes and posts time changes. It tracks job numbers not in RM, error messages, and generally posts action results and a summary of everything it did'
-        self.manual_adjust = []
         self.undeployed_job_nums = []
         self.undeployed_job_nums_instance = 0
         self.api_error_messages = []
@@ -262,11 +316,8 @@ class SmartsheetRmAdmin():
                 raise ValueError(f"Unknown action: {action}")
 
         # loging actions
-            if not success:
-                self.manual_adjust.append(entry)
-                self.log.log(f"{i+1}/{tot}  Failed to {action} time entry for {entry['user_email']} on {entry['date']}.")
-            else:
-                self.log.log(f"{i+1}/{tot}  Time entry {action} for {entry['user_email']} on {entry['date']} was a success!")
+            if success:
+                entry['messages'].append("Successful post @ DATE!")
                 if action == 'add':
                     successful_add += 1
                 elif action == 'update':
@@ -284,6 +335,8 @@ class SmartsheetRmAdmin():
         result_list = []
         for id in timeentry['rm_entry_id']:
             result_list.append(requests.delete(f"{self.base_url}/api/v1/users/{timeentry['rm_userid']}/time_entries/{id}", headers=self.rm_header).status_code)
+        if not all(code == 200 for code in result_list):
+            timeentry['messages'].extend(["FAILED PREPOST DELETION: incorrect hours associated with this time/user/job number failed to delete"])
         return all(code == 200 for code in result_list)
     def add_new_timedata(self, timeentry):
         '''this posts the correct time data
@@ -304,15 +357,15 @@ class SmartsheetRmAdmin():
             if result.json().get('errors'):
                 self.api_error_messages_instance += 1
                 for error in result.json().get('errors'):
+                    timeentry['messages'].extend([f"FAILED TIME POST: {error}" for error in result.json().get('errors')])
                     if error not in self.api_error_messages:
                         self.api_error_messages.append(error)
             return result.status_code == 200
         else:
             if timeentry['job_num'] not in self.undeployed_job_nums:
+                timeentry['messages'].extend([f"FAILED TIME POST: {timeentry['job_num']} is not in the system, so cannot post time to it"])
                 self.undeployed_job_nums.append(timeentry['job_num'])
             self.undeployed_job_nums_instance += 1
-
-
     #endregion
     #region Project Syncing
     def grab_proj_sheetids(self):
@@ -518,7 +571,7 @@ if __name__ == "__main__":
     }
     sra = SmartsheetRmAdmin(config)
     sra.run_hours_update()
-    sra.run_proj_metadata_update()
+    # sra.run_proj_metadata_update()
     sra.log.log("""~Fin
                      
                 """)
