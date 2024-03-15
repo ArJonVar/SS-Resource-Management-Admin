@@ -1,6 +1,7 @@
 #region imports
 import smartsheet
 from smartsheet.exceptions import ApiError
+from datetime import datetime
 from smartsheet_grid import grid
 import requests
 import json
@@ -24,7 +25,7 @@ class SmartsheetRmAdmin():
             'Content-Type': 'application/json',
             'auth': self.rm_token
         }
-        self.post_to_hh2_on_ss = []
+        self.error_w_hh2sheet = []
         self.base_url='https://api.rm.smartsheet.com'
     #region helpers
     def apply_config(self, config):
@@ -71,7 +72,17 @@ class SmartsheetRmAdmin():
                 self.log.log(f"Failed to fetch data: {response.status_code} - {response.reason}")
                 break  # Exit loop on failure
         return items if items else []
-
+    def convert_date_format(self, original_date):
+        '''converst YEAR-0DAY-0MONTH to day/month/year'''
+        year, month, day = original_date.split('-')
+        month = str(int(month))  # Remove leading zero
+        day = str(int(day))  # Remove leading zero
+        return f"{month}/{day}/{year}"
+    def generate_now_string(self):
+        '''generates now string for psoting'''
+        now = datetime.now()
+        dt_string = now.strftime("%m/%d %H:%M")
+        return dt_string
     #endregion
     #region Time & Expense
     def grab_rm_userids(self):
@@ -82,9 +93,11 @@ class SmartsheetRmAdmin():
         self.sageid_to_email={}
         self.userid_to_email={}
         self.email_to_userid={}
+        self.email_to_sageid = {}
         for user in response_dict:
             self.rm_user_list.append({'email': user['email'].lower(), 'rm_usr_id':  user['id'], 'name': user['display_name'], 'sage id': user['employee_number']})
             self.sageid_to_email[user['employee_number']] = user['email'].lower()
+            self.email_to_sageid[user['email'].lower()] = user['employee_number']
             self.userid_to_email[user['id']] = user['email'].lower()
             self.email_to_userid[user['email'].lower()] = user['id']
     def grab_rm_projids(self):
@@ -147,7 +160,9 @@ class SmartsheetRmAdmin():
         sheet = grid(self.hh2_data_sheetid)
         sheet.fetch_content()
         df = sheet.df
-        df = df.drop(['Script Message', 'Key', 'Message Repeater'], axis=1)
+        self.scriptkey_to_script_message = pd.Series(df['Script Message'].values,index=df['Script Key']).to_dict()
+
+        df = df.drop(['Script Message', 'Script Key',  'Repeater Key', 'Message Repeater', 'Formatter'], axis=1)
 
         invalid_column_list = self.validate_and_contains_first_row(df)
 
@@ -155,9 +170,8 @@ class SmartsheetRmAdmin():
             df = self.clean_df_for_processing(df)
             self.flat_hh2_records = self.aggregate_hh2_data(df)
         else: 
-            error = f"First row validation failed (so script did not run properly). Please check {invalid_column_list} columns."
-            self.post_to_hh2_on_ss = {'id':sheet.df['id'][0], 'value':error}
-            self.log.log(error)
+            self.error_w_hh2sheet.append(f"First row validation failed (so script did not run properly). Please check {invalid_column_list} columns. ({self.generate_now_string()})")
+            self.log.log(f'HH2 Sheet error: please check the following column(s) {invalid_column_list} at https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid&filterId=3306346053062532')
             return None  # Return to avoid further processing
     def clean_df_for_processing(self, df):
         '''cleans incoming hh2 data from smartsheet'''
@@ -167,15 +181,16 @@ class SmartsheetRmAdmin():
         df['Description'] = df['Description'].astype(str)
         df['Units'] = pd.to_numeric(df['Units'], errors='coerce')
         return df
-    def aggregate_hh2_dataOLD(self, df):
+    def aggregate_hh2_data(self, df):
         '''filteres by approval type, then turns the df into a dict w recrds, 
         making sure to add all units incase there are two entries for the same day/job number'''
         # Chat GPT helped me with this to make it run faster:
         grouped = df[df['ApprovalType'] == 'Sealed'].groupby(
-        ['Job', 'Date', 'EmployeeNumber', 'CostCodeName']
+        ['Job', 'Date', 'EmployeeNumber']
         ).agg({
             'Units': 'sum',
-            'Description': lambda x: ' '.join(x)
+            'Description': lambda x: ' '.join(x),
+            'CostCodeName': lambda x: ' | '.join(x)
         }).reset_index()
         
         # Assuming EmployeeNumber to email mapping is preprocessed if possible
@@ -202,53 +217,13 @@ class SmartsheetRmAdmin():
             "date": record['date'],
             "hours": record['Units'],
             "task": record['CostCodeName'],
-            "notes": record['Description'],
-            "ss_row_id": record['id']
+            "notes": record.get('Description'),
+            # "ss_row_id": record['id'],
+            "key" : f"{self.email_to_sageid.get(record['user'])}{self.convert_date_format(record['date'])}{record['Job']}Sealed",
+            "messages": []
         } for record in records]
     
         return flat_hh2_records
-    def aggregate_hh2_data(self, df):
-        # Assuming df is your DataFrame
-        # Filter the DataFrame to keep only rows where ApprovalType is 'Sealed' or 'Submitted'
-        filtered_df = df[df['ApprovalType'].isin(['Sealed'])].copy()
-
-        filtered_df['Date'] = pd.to_datetime(filtered_df['Date'])
-        filtered_df['Description'] = filtered_df['Description'].astype(str)
-        filtered_df['Units'] = pd.to_numeric(filtered_df['Units'], errors='coerce')
-
-        # Simplify DataFrame to only keep necessary columns
-        simplified_df = filtered_df[['Job', 'Date', 'EmployeeNumber', 'Description', 'CostCodeName', 'Units', 'id']].copy()
-        self.debug = simplified_df
-
-        simplified_df['user'] = simplified_df['EmployeeNumber'].map(self.sageid_to_email).fillna('default_email@example.com')
-        simplified_df['date'] = simplified_df['Date'].dt.date.astype(str)  # Ensuring date format
-        simplified_df['rm_user_id'] = simplified_df['user'].apply(lambda x: self.email_to_userid.get(x.lower()))
-        simplified_df['rm_proj_id'] = simplified_df['Job'].apply(lambda x: self.jobnum_to_rm_id.get(x, ''))
-
-        # Calculate min and max dates if needed
-        self.min_date = simplified_df['date'].min()
-        self.max_date = simplified_df['date'].max()
-
-        # Directly construct the records without explicit row iteration
-        records = simplified_df.to_dict('records')
-        self.records = records
-
-        # Transform records into the desired format
-        flat_hh2_records = [{
-            "user_email": record['user'],
-            "rm_userid": record['rm_user_id'],
-            "job_num": record['Job'],
-            'rm_proj_id': record['rm_proj_id'],
-            "date": record['date'],
-            "hours": record['Units'],
-            "task": record['CostCodeName'],
-            "notes": record.get('Description'),
-            "ss_row_id": record['id'],
-            "messages": []
-        } for record in records]
-
-        return flat_hh2_records
-
     def grab_rm_timedata(self):
         '''grabs existing data from rm, translates rm job id to job number, rm user id to user email, 
         and then builds out a reference dictionary of time entries (hrs) for verifying if update is needed, adding hours for same job/time as needed
@@ -270,9 +245,9 @@ class SmartsheetRmAdmin():
                 self.rm_quickreference_hrs[key] = old_number + timeentry['hours']
                 self.rm_quickreference_id[key].append(timeentry['id'])  # Directly append the new id to the list
     def process_timedata_discrepencies(self):
-        '''compare hh2 data (on ss) w/ rm data'''
-        self.timedata_to_adjust=[]
-        up_to_date, to_update, to_add, to_add_projntime=0,0,0,0
+        '''compare hh2 data (on ss) w/ rm data. The end result is a list of time entries and their needed actions'''
+        up_to_date, to_update, to_add, self.to_add_projntime=0,0,0,0
+        self.undeployed_job_nums = []
         for timeentry in self.flat_hh2_records:
             key = f"{timeentry['user_email'].lower()}{timeentry['date']}{timeentry['job_num']}"
             try:
@@ -280,15 +255,17 @@ class SmartsheetRmAdmin():
                 if self.rm_quickreference_hrs[key] != timeentry['hours']:
                     timeentry['action'] = 'update'
                     timeentry['rm_entry_id'] = self.rm_quickreference_id[key]
-                    self.timedata_to_adjust.append(timeentry)
                     to_update += 1
                 else:
+                    timeentry['action'] = 'current'
                     up_to_date += 1
             except KeyError:
                 timeentry['action'] = 'add'
-                self.timedata_to_adjust.append(timeentry)
                 if timeentry['rm_proj_id'] == '':
-                    to_add_projntime +=1
+                    timeentry['messages'].extend([f"FAILED TO PROCESS: Job Number {timeentry['job_num']} is not in the system, so cannot post time to a time entry ({self.generate_now_string()})"])
+                    self.to_add_projntime +=1
+                    if timeentry['job_num'] not in self.undeployed_job_nums:
+                        self.undeployed_job_nums.append(timeentry['job_num'])
                 else:
                     to_add += 1
                 continue
@@ -296,36 +273,34 @@ class SmartsheetRmAdmin():
     {up_to_date} entries current,
     {to_update} entries needing update
     {to_add} entries need to be added
-    {to_add_projntime} entries that first need project added, then time added""")
-    def post_time_changes(self):
+    {self.to_add_projntime} entries that first need project added, then time added""")
+        #region post data to rm
+    def post_rm_time_changes(self):
         'processes and posts time changes. It tracks job numbers not in RM, error messages, and generally posts action results and a summary of everything it did'
-        self.undeployed_job_nums = []
-        self.undeployed_job_nums_instance = 0
         self.api_error_messages = []
-        self.api_error_messages_instance = 0
-        tot = len(self.timedata_to_adjust)
-        successful_update, successful_add = 0, 0
+        self.api_error_messages_instance, successful_update, successful_add = 0, 0, 0
+        success = False
         # actions
-        for i, entry in enumerate(self.timedata_to_adjust):
+        for i, entry in enumerate(self.flat_hh2_records):
             action = entry.get('action')
             if action== "add":
                 success= self.add_new_timedata(entry)
             elif action== "update":
                 success= self.delete_old_timedata(entry) and self.add_new_timedata(entry)
-            else:
-                raise ValueError(f"Unknown action: {action}")
+            elif action == "current":
+                entry['messages'].append(f"Job was current with {entry['hours']}, no action excuted ({self.generate_now_string()})")
 
         # loging actions
             if success:
-                entry['messages'].append("Successful post @ DATE!")
+                entry['messages'].append(f"Successful post of {entry['hours']} ({self.generate_now_string()})")
                 if action == 'add':
                     successful_add += 1
                 elif action == 'update':
                     successful_update += 1
 
         # summary of action
-        if self.undeployed_job_nums != []:
-            self.log.log(f"There was {self.undeployed_job_nums_instance} instances where a time entry post was attempted on a job we didn't have in the Resouce manager, these were for job(s): {self.undeployed_job_nums }")
+        if self.to_add_projntime > 0:
+            self.log.log(f"There was {self.to_add_projntime} instances where a time entry post was attempted on a job we didn't have in the Resouce manager, these were for job(s): {self.undeployed_job_nums}")
         if self.api_error_messages != []:
             self.log.log(f"There was {self.api_error_messages_instance} instances where a time entry post failed due to api error, those errors were: {self.api_error_messages}")
         if successful_update > 0 or successful_add > 0:
@@ -336,7 +311,7 @@ class SmartsheetRmAdmin():
         for id in timeentry['rm_entry_id']:
             result_list.append(requests.delete(f"{self.base_url}/api/v1/users/{timeentry['rm_userid']}/time_entries/{id}", headers=self.rm_header).status_code)
         if not all(code == 200 for code in result_list):
-            timeentry['messages'].extend(["FAILED PREPOST DELETION: incorrect hours associated with this time/user/job number failed to delete"])
+            timeentry['messages'].extend([f"FAILED PREPOST DELETION: incorrect hours associated with this time/user/job number failed to delete ({self.generate_now_string()})"])
         return all(code == 200 for code in result_list)
     def add_new_timedata(self, timeentry):
         '''this posts the correct time data
@@ -357,15 +332,15 @@ class SmartsheetRmAdmin():
             if result.json().get('errors'):
                 self.api_error_messages_instance += 1
                 for error in result.json().get('errors'):
-                    timeentry['messages'].extend([f"FAILED TIME POST: {error}" for error in result.json().get('errors')])
+                    timeentry['messages'].extend([f"FAILED TIME POST: {error} ({self.generate_now_string()})" for error in result.json().get('errors')])
                     if error not in self.api_error_messages:
                         self.api_error_messages.append(error)
             return result.status_code == 200
         else:
-            if timeentry['job_num'] not in self.undeployed_job_nums:
-                timeentry['messages'].extend([f"FAILED TIME POST: {timeentry['job_num']} is not in the system, so cannot post time to it"])
-                self.undeployed_job_nums.append(timeentry['job_num'])
-            self.undeployed_job_nums_instance += 1
+            # returns false because no proj_id which means could not post. The error was caught and documented in process_timedata_discrepencies()
+            return False
+        #end region
+        #endregion
     #endregion
     #region Project Syncing
     def grab_proj_sheetids(self):
@@ -477,26 +452,6 @@ class SmartsheetRmAdmin():
 
         if response.status_code == 200:
             self.log.log(f"Updated {proj['name']}'s meta data")
-    def update_rm_proj_tagsfield(self, rm_proj_metadata, proj):
-        '''NO LONGER USER TAGS, NOW OUT OF DATE: updates project meta data that has been found to be out of sync.
-        standard data fields, tags, and custom data fields each have a different method to update
-        tags have no put, so old one needs to be deleted, and new one added'''
-        delete_response = requests.delete(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}/tags/{rm_proj_metadata['proj_status_rm_id']}", headers=self.rm_header)
-        # tags field
-        
-        if delete_response.status_cude == 200:
-            data = {
-                'id':proj['rm_id'],
-                'value':proj['meta_data']['DCT Status']
-            }
-            post_response = requests.post(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}/tags", headers=self.rm_header, data=json.dumps(data))
-
-            if post_response.status_code == 200:
-                self.log.log(f"Updated {proj['name']}'s meta data")
-            else:
-                self.log.log(f"Successfully deleted {proj['name']}'s tag, but did not succeed to add the new one, therefore the project currently has no Proj Status")
-        else:
-            self.log.log(f"failed to delete {proj['name']}'s tag and therefore did not attempt to add the new tag, so tags are still out of sync")
     def update_rm_proj_customfields(self, rm_proj_metadata,proj):
         '''updates project meta data that has been found to be out of sync.
         standard data fields, tags, and custom data fields each have a different method to update'''
@@ -523,7 +478,37 @@ class SmartsheetRmAdmin():
                 self.log.log(f"{proj['name']} failed to update its custom fields")
         #endregion
     #endregion
+    #region post to ss
+    def find_string_differences(self, str1, str2):
+        # Check if the strings are of the same length
+        if len(str1) != len(str2):
+            print(f"The strings have different lengths: {len(str1)} and {len(str2)}")
 
+        # Find and print differences
+        differences = []
+        for i in range(min(len(str1), len(str2))):  # Compare up to the length of the shorter string
+            if str1[i] != str2[i]:
+                differences.append((i, str1[i], str2[i]))
+
+        if differences:
+            print("Differences found at positions:")
+            for pos, char1, char2 in differences:
+                print(f"Position {pos}: '{char1}' (string 1) != '{char2}' (string 2)")
+        else:
+            print("The strings are identical.")
+    def post_ss_data(self, data):
+        '''posts back to ss a message if the message is different than what is currently there '''
+        self.posting_data = []
+        for row in data:
+            existing_message = self.scriptkey_to_script_message[row['key']]
+            new_message = " ".join(row['messages'])
+            # if the new message and old are the same (barring time-stamp, but not date-stamp), do not update ss
+            if existing_message[:len(existing_message)-6] != new_message[:len(new_message)-6]:
+                self.posting_data.append({"Script Key":row['key'], 'Script Message':new_message})
+        self.posting_data.insert(0, {"Script Key":"EmployeeNumberDateJobApprovalType", 'Script Message':""})
+        sheet = grid(self.hh2_data_sheetid)
+        sheet.update_rows(self.posting_data, "Script Key")
+    #endregion
 
 
     def run_hours_update(self):
@@ -533,11 +518,15 @@ class SmartsheetRmAdmin():
         self.grab_rm_userids()
         self.audit_users_emplnum()
         self.grab_rm_projids()
-        self.fetch_and_prepare_hh2_data()
-        self.grab_rm_timedata()
-        self.process_timedata_discrepencies()
-        self.post_time_changes()
-        grid(self.hh2_data_sheetid).handle_update_stamps()
+        # self.fetch_and_prepare_hh2_data()
+        # self.grab_rm_timedata()
+        # if self.error_w_hh2sheet == []:
+        #     self.process_timedata_discrepencies()
+        #     self.post_rm_time_changes()
+        #     self.post_ss_data(self.flat_hh2_records)
+        # else:
+        #     self.post_ss_data([{"key":"EmployeeNumberDateJobApprovalType", 'messages':self.error_w_hh2sheet}])
+        # grid(self.hh2_data_sheetid).handle_update_stamps()
     def run_proj_metadata_update(self):
         '''katherine has mapped particular columns of her project template to meta data fields in RM, this script keeps it up to date'''
         self.log.log("""Project Metadata Updates:
@@ -556,7 +545,6 @@ class SmartsheetRmAdmin():
                 except:
                     self.log.log('issues locating the proj metadata resulted in failed update')
 
-
 if __name__ == "__main__":
     # https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid is hh2 data sheet
     # https://app.smartsheet.com/browse/workspaces/GXmwRM4wcCmjMVGVjhJ2cWCFR9QWMQCr5w8WGrx1 is proj workspace
@@ -571,7 +559,7 @@ if __name__ == "__main__":
     }
     sra = SmartsheetRmAdmin(config)
     sra.run_hours_update()
-    # sra.run_proj_metadata_update()
+    sra.run_proj_metadata_update()
     sra.log.log("""~Fin
                      
                 """)
