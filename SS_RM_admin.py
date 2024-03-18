@@ -102,7 +102,7 @@ class SmartsheetRmAdmin():
             self.email_to_userid[user['email'].lower()] = user['id']
     def grab_rm_projids(self):
         '''grabs each project's id from RM in SS, also makes dict that can translate rm_id to job number for time & expense'''
-        response_dict = self.paginated_rm_getrequest(endpoint='/api/v1/projects?sort_field=created&sort_order=ascending')
+        response_dict = self.paginated_rm_getrequest(endpoint='/api/v1/projects?sort_field=created&sort_order=ascending&with_archived=true')
 
         self.rm_proj_list=[]
         self.rm_id_to_jobnum = {}
@@ -111,10 +111,17 @@ class SmartsheetRmAdmin():
         self.jobnum_to_name={}
         for proj in response_dict:
             if proj['name'] != "":
+                original_jobnumn = proj['project_code']
+                if isinstance(original_jobnumn, str):
+                    if original_jobnumn.find('.') != -1:
+                        proj['project_code'] = original_jobnumn[:original_jobnumn.find('.')]
+                    self.jobnum_to_name[proj['project_code']]=proj['name']
+                    self.jobnum_to_rm_id[proj['project_code']] = proj['id']
+                else:
+                    pass
+
                 self.rm_proj_list.append({'project name':proj['name'],  'job number':proj['project_code'], 'rm_proj_id':proj['id']})
                 self.rm_id_to_jobnum[proj['id']] = proj['project_code']
-                self.jobnum_to_name[proj['project_code']]=proj['name']
-                self.jobnum_to_rm_id[proj['project_code']] = proj['id']
         #region remedy no sage id
     def grab_sage_id_dict(self):
         '''grab sage id // email dict from ss'''
@@ -443,10 +450,10 @@ class SmartsheetRmAdmin():
         '''updates project meta data that has been found to be out of sync.
         standard data fields, tags, and custom data fields each have a different method to update'''
         # standard fields
-        data = {
+        data =  {
             'id':proj['rm_id'],
             'project_code':proj['meta_data']['Build Job Number'],
-            'region':proj['meta_data']['Build Region'],
+            'client':proj['meta_data']['Build Region'],
         }
         response = requests.put(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}", headers=self.rm_header, data=json.dumps(data))
 
@@ -466,7 +473,6 @@ class SmartsheetRmAdmin():
             else:
                 self.log.log('failed to post custom field updates, system could not find the fields in its meta data')
 
-            print(proj['rm_id'], custom_field['rm_id'], custom_field)
             self.response = requests.put(
                 f"https://api.rm.smartsheet.com/api/v1/projects/{proj['rm_id']}/custom_field_values/{custom_field['rm_id']}", 
                 headers=self.rm_header, 
@@ -478,24 +484,13 @@ class SmartsheetRmAdmin():
                 self.log.log(f"{proj['name']} failed to update its custom fields")
         #endregion
     #endregion
+    #region Assignments
+    def grab_rm_assignment_data(self, rm_proj_id):
+        '''grabs rm assignment data to check if any updates are needed'''
+        self.paginated_rm_getrequest(f"/api/v1/projects/{rm_proj_id}/assignments")
+
+    #endregion
     #region post to ss
-    def find_string_differences(self, str1, str2):
-        # Check if the strings are of the same length
-        if len(str1) != len(str2):
-            print(f"The strings have different lengths: {len(str1)} and {len(str2)}")
-
-        # Find and print differences
-        differences = []
-        for i in range(min(len(str1), len(str2))):  # Compare up to the length of the shorter string
-            if str1[i] != str2[i]:
-                differences.append((i, str1[i], str2[i]))
-
-        if differences:
-            print("Differences found at positions:")
-            for pos, char1, char2 in differences:
-                print(f"Position {pos}: '{char1}' (string 1) != '{char2}' (string 2)")
-        else:
-            print("The strings are identical.")
     def post_ss_data(self, data):
         '''posts back to ss a message if the message is different than what is currently there '''
         self.posting_data = []
@@ -510,27 +505,31 @@ class SmartsheetRmAdmin():
         sheet.update_rows(self.posting_data, "Script Key")
     #endregion
 
-
-    def run_hours_update(self):
-        '''runs main script as intended'''
-        self.log.log("""Time & Expense Updates:
+    def grab_rm_data(self):
+        ''''''
+        self.log.log("""Grabbing RM Data
                      """)
         self.grab_rm_userids()
         self.audit_users_emplnum()
         self.grab_rm_projids()
-        # self.fetch_and_prepare_hh2_data()
-        # self.grab_rm_timedata()
-        # if self.error_w_hh2sheet == []:
-        #     self.process_timedata_discrepencies()
-        #     self.post_rm_time_changes()
-        #     self.post_ss_data(self.flat_hh2_records)
-        # else:
-        #     self.post_ss_data([{"key":"EmployeeNumberDateJobApprovalType", 'messages':self.error_w_hh2sheet}])
-        # grid(self.hh2_data_sheetid).handle_update_stamps()
+    def run_hours_update(self):
+        '''runs main script as intended'''
+        self.log.log("""Time & Expense Updates:
+                     """)
+        self.fetch_and_prepare_hh2_data()
+        self.grab_rm_timedata()
+        if self.error_w_hh2sheet == []:
+            self.process_timedata_discrepencies()
+            self.post_rm_time_changes()
+            self.post_ss_data(self.flat_hh2_records)
+        else:
+            self.post_ss_data([{"key":"EmployeeNumberDateJobApprovalType", 'messages':self.error_w_hh2sheet}])
+        grid(self.hh2_data_sheetid).handle_update_stamps()
     def run_proj_metadata_update(self):
         '''katherine has mapped particular columns of her project template to meta data fields in RM, this script keeps it up to date'''
         self.log.log("""Project Metadata Updates:
                      """)
+        self.grab_rm_projids()
         self.grab_proj_sheetids()
         self.establish_sheet_connection()
         tot = len(self.ss_proj_list)
@@ -544,6 +543,11 @@ class SmartsheetRmAdmin():
                     self.execute_conditional_rm_proj_update(rm_proj_metadata, proj)
                 except:
                     self.log.log('issues locating the proj metadata resulted in failed update')
+    def run_assignment_updates(self):
+        '''assignments in rm are linked to users and projects and are line-item tasks in ss per project'''
+        for proj in self.ss_proj_list:
+            if proj['status'] == 'connected':
+                pass
 
 if __name__ == "__main__":
     # https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid is hh2 data sheet
@@ -558,8 +562,9 @@ if __name__ == "__main__":
         
     }
     sra = SmartsheetRmAdmin(config)
+    sra.grab_rm_data()
+    # sra.run_proj_metadata_update()
     sra.run_hours_update()
-    sra.run_proj_metadata_update()
     sra.log.log("""~Fin
                      
                 """)
