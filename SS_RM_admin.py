@@ -83,8 +83,6 @@ class SmartsheetRmAdmin():
         now = datetime.now()
         dt_string = now.strftime("%m/%d %H:%M")
         return dt_string
-    #endregion
-    #region Time & Expense
     def grab_rm_userids(self):
         '''grabs each user's id, this will help with allocating hours to users correctly'''
         response_dict = self.paginated_rm_getrequest(endpoint='/api/v1/users')
@@ -122,6 +120,8 @@ class SmartsheetRmAdmin():
 
                 self.rm_proj_list.append({'project name':proj['name'],  'job number':proj['project_code'], 'rm_proj_id':proj['id']})
                 self.rm_id_to_jobnum[proj['id']] = proj['project_code']
+    #endregion
+    #region Time & Expense
         #region remedy no sage id
     def grab_sage_id_dict(self):
         '''grab sage id // email dict from ss'''
@@ -153,7 +153,7 @@ class SmartsheetRmAdmin():
 
         self.needs_emplnum_update = []
         for user in self.rm_user_list:
-            if user['sage id'] == '':
+            if user['sage id'] == '' or user['sage id'] == None:
                 self.needs_emplnum_update.append(user)
         
         if len(self.needs_emplnum_update) > 0: 
@@ -204,7 +204,9 @@ class SmartsheetRmAdmin():
         # For direct transformation without .iterrows()
         grouped['user'] = grouped['EmployeeNumber'].map(self.sageid_to_email).fillna('default_email@example.com')
         grouped['date'] = pd.to_datetime(grouped['Date']).dt.date.astype(str)  # Ensuring date format
-        grouped['rm_user_id'] = grouped['user'].apply(lambda x: self.email_to_userid.get(x.lower()))
+        grouped['rm_user_id'] = grouped['user'].apply(
+            lambda x: str(int(self.email_to_userid.get(x.lower()))) if self.email_to_userid.get(x.lower()) is not None else None
+        )
         grouped['rm_proj_id'] = grouped['Job'].apply(lambda x: self.jobnum_to_rm_id.get(x, ''))
 
         # Calculate min and max dates
@@ -329,7 +331,7 @@ class SmartsheetRmAdmin():
             'date': timeentry['date'],
             'hours': timeentry['hours'],
             'task': timeentry['task'],
-            'notes':timeentry['notes'][0:256]
+            'notes':timeentry['notes'][0:254]
         }
         if timeentry['rm_proj_id']:
             result = requests.post(
@@ -459,6 +461,40 @@ class SmartsheetRmAdmin():
 
         if response.status_code == 200:
             self.log.log(f"Updated {proj['name']}'s meta data")
+    def update_archived_projects(self):
+        '''archived project cannot have a job number // normal name b/c that may interfere with time & expense posting. To do this correctly, I need to first unarchive, then rearchive proj....'''
+        self.log.log('Updating Archived Projects as needed...')
+        response_dict = self.paginated_rm_getrequest(endpoint='/api/v1/projects?sort_field=created&sort_order=ascending&with_archived=true')
+        self.archived_proj = []
+        
+        for proj in response_dict:
+            if proj['archived']:
+                self.archived_proj.append(proj)
+                if proj['name'].find('ARCHIVED') == -1:
+                    self.log.log(f"""{proj['name']} starting update loop
+                                 """)
+                    data1 =  {
+                        'id':proj['id'],
+                        'archived':'false'
+                    }
+                    data2 = {
+                        'id':proj['id'],
+                        'project_code':" ",
+                        'name': f"{proj['name']}_ARCHIVED"
+                    }
+                    data3 ={
+                        'id':proj['id'],
+                        'archived':'true'
+                    }
+                    response1 = requests.put(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['id']}", headers=self.rm_header, data=json.dumps(data1))
+                    response2 = requests.put(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['id']}", headers=self.rm_header, data=json.dumps(data2))
+                    response3 = requests.put(f"https://api.rm.smartsheet.com/api/v1/projects/{proj['id']}", headers=self.rm_header, data=json.dumps(data3))
+
+                    if response1.status_code and response2.status_code and response3.status_code == 200:
+                        self.log.log(f"Correctly Archived {proj['name']}")
+                    else:
+                        self.log.log(f"error with update- 1:{response1.json()} 2:{response2.json()} 3:{response3.json()}")
+        self.grab_rm_projids()
     def update_rm_proj_customfields(self, rm_proj_metadata,proj):
         '''updates project meta data that has been found to be out of sync.
         standard data fields, tags, and custom data fields each have a different method to update'''
@@ -495,7 +531,7 @@ class SmartsheetRmAdmin():
         '''posts back to ss a message if the message is different than what is currently there '''
         self.posting_data = []
         for row in data:
-            existing_message = self.scriptkey_to_script_message[row['key']]
+            existing_message = str(self.scriptkey_to_script_message[row['key']])
             new_message = " ".join(row['messages'])
             # if the new message and old are the same (barring time-stamp, but not date-stamp), do not update ss
             if existing_message[:len(existing_message)-6] != new_message[:len(new_message)-6]:
@@ -511,11 +547,13 @@ class SmartsheetRmAdmin():
                      """)
         self.grab_rm_userids()
         self.audit_users_emplnum()
+        self.update_archived_projects()
         self.grab_rm_projids()
     def run_hours_update(self):
         '''runs main script as intended'''
         self.log.log("""Time & Expense Updates:
                      """)
+        self.grab_rm_userids()
         self.fetch_and_prepare_hh2_data()
         self.grab_rm_timedata()
         if self.error_w_hh2sheet == []:
@@ -529,7 +567,6 @@ class SmartsheetRmAdmin():
         '''katherine has mapped particular columns of her project template to meta data fields in RM, this script keeps it up to date'''
         self.log.log("""Project Metadata Updates:
                      """)
-        self.grab_rm_projids()
         self.grab_proj_sheetids()
         self.establish_sheet_connection()
         tot = len(self.ss_proj_list)
@@ -543,6 +580,7 @@ class SmartsheetRmAdmin():
                     self.execute_conditional_rm_proj_update(rm_proj_metadata, proj)
                 except:
                     self.log.log('issues locating the proj metadata resulted in failed update')
+        self.grab_rm_projids()
     def run_assignment_updates(self):
         '''assignments in rm are linked to users and projects and are line-item tasks in ss per project'''
         for proj in self.ss_proj_list:
@@ -563,7 +601,7 @@ if __name__ == "__main__":
     }
     sra = SmartsheetRmAdmin(config)
     sra.grab_rm_data()
-    # sra.run_proj_metadata_update()
+    sra.run_proj_metadata_update()
     sra.run_hours_update()
     sra.log.log("""~Fin
                      
