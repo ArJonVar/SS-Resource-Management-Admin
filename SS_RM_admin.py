@@ -83,6 +83,29 @@ class SmartsheetRmAdmin():
         now = datetime.now()
         dt_string = now.strftime("%m/%d %H:%M")
         return dt_string
+    def return_email_list(self, sheet_id, df):
+        '''OUTDATED grabs all sheet data, and returns a list of emails that is in the same order as the row (which can be used to filter out emails not in RM)'''
+        response = requests.get(f'https://api.smartsheet.com/2.0/sheets/{sheet_id}?level=2&include=objectValue', headers={'Authorization': f"Bearer {sra.smartsheet_token}"})
+        if response.status_code == 200:
+            self.data = response.json()
+            self.i = self.find_email_index(self.data, df)
+            email_list = []
+            for row in self.data:
+                try:
+                    email_list.append(row['cells'][self.i]['objectValue']['name'])
+                # blank rows won't have objectValue in them
+                except KeyError:
+                    pass
+        else:
+            self.log.log('error with grabbing emails from sheet...')
+    def find_email_index(self, data, df):
+        '''OUTDATED used to find the column index that has PRIMARY DCT so I can grab emails via requests library and column index (and use this to filter out emails that are not already in RM)'''
+        for row in data['rows']:
+            for i, cell in enumerate(row['cells']):
+                if isinstance(cell.get('objectValue'), dict):
+                    print(cell.get('objectValue').get('name'), df['PRIMARY DCT'].tolist()[0])
+                    if cell.get('objectValue').get('name') == df['PRIMARY DCT'].tolist()[0]:
+                        return i
     def grab_rm_userids(self):
         '''grabs each user's id, this will help with allocating hours to users correctly'''
         response_dict = self.paginated_rm_getrequest(endpoint='/api/v1/users')
@@ -391,11 +414,19 @@ class SmartsheetRmAdmin():
     def grab_connected_sheet_data(self, sheet_i, sheet_info):
         '''if the sheet is connected, grab the nessisary data'''
         if sheet_info['status'] == "connected":
-            sheet = grid(sheet_info['ss_sheet_id'])
-            sheet.fetch_summary_content()
-            self.parent_data= sheet.df.to_dict('records')
+            sheet_sum = grid(sheet_info['ss_sheet_id'])
+            sheet_sum.fetch_summary_content()
+            self.parent_data= sheet_sum.df.to_dict('records')
             meta_data = {sum_field['title']: sum_field['displayValue'] for sum_field in self.parent_data if sum_field['title'] in ['Project Enumerator [MANUAL ENTRY]', 'DCT Status', 'Build Region', 'Build Job Number', 'Build Architect']}
+            sheet_grid = grid(sheet_info['ss_sheet_id'])
+            sheet_grid.fetch_content()
+            df = sheet_grid.df
+            sheet_dict = df[df['Project'].notna()].to_dict('records')
+            assignment_data = []
+            for line_item in sheet_dict:
+                assignment_data.append({'ss_task_name': line_item['Task Name'], 'ss_task_status':line_item['DCT Status']})
             self.ss_proj_list[sheet_i]['meta_data'] = meta_data
+            self.ss_proj_list[sheet_i]['assignment_data'] = assignment_data
     def get_rmproj_metadata(self, proj):
         '''checks connected projects for sync of meta data (checking standard, and non standard Arch and Proj Enum fields seperatly), and compares. If out of sync, sounds to api call'''
         endpoint = f"/api/v1/projects/{proj['rm_id']}"
@@ -521,9 +552,22 @@ class SmartsheetRmAdmin():
         #endregion
     #endregion
     #region Assignments
-    def grab_rm_assignment_data(self, rm_proj_id):
+    def grab_rm_assignment_data(self, proj):
         '''grabs rm assignment data to check if any updates are needed'''
-        self.paginated_rm_getrequest(f"/api/v1/projects/{rm_proj_id}/assignments")
+        rm_assignment_data = self.paginated_rm_getrequest(f"/api/v1/projects/{proj['rm_id']}/assignments")
+        rm_assignment_ids = []
+        for assignment in rm_assignment_data:
+            rm_assignment_ids.append(assignment['id'])
+        proj['rm_assignment_ids'] = rm_assignment_ids
+    def update_rm_assignments(self, proj):
+        '''make updates to assignments, but matching the order in RM to the Order in SS and then mapping SS Task Name/Task Status to RM Assignment Description Work Status'''
+        for i, id in enumerate(proj['rm_assignment_ids']):
+            data = {
+                'description':proj['assignment_data'][i]['ss_task_name'],
+                'status': proj['assignment_data'][i]['ss_task_status'],
+            }
+            response = requests.put(f"https://api.rm.smartsheet.com/api/v1/assignments/{id}", headers=self.rm_header, data=json.dumps(data))
+            print(response.json())
 
     #endregion
     #region post to ss
@@ -583,9 +627,11 @@ class SmartsheetRmAdmin():
         self.grab_rm_projids()
     def run_assignment_updates(self):
         '''assignments in rm are linked to users and projects and are line-item tasks in ss per project'''
+        self.log.log("""Project Assignment Updates:
+                     """)
         for proj in self.ss_proj_list:
             if proj['status'] == 'connected':
-                pass
+                self.grab_rm_assignment_data(proj)
 
 if __name__ == "__main__":
     # https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid is hh2 data sheet
@@ -602,7 +648,8 @@ if __name__ == "__main__":
     sra = SmartsheetRmAdmin(config)
     sra.grab_rm_data()
     sra.run_proj_metadata_update()
-    sra.run_hours_update()
+    # sra.run_hours_update()
+    sra.run_assignment_updates()
     sra.log.log("""~Fin
                      
                 """)
