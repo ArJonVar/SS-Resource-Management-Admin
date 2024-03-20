@@ -422,9 +422,9 @@ class SmartsheetRmAdmin():
             sheet_grid.fetch_content()
             df = sheet_grid.df
             sheet_dict = df[df['Project'].notna()].to_dict('records')
-            assignment_data = []
+            assignment_data = {}
             for line_item in sheet_dict:
-                assignment_data.append({'ss_task_name': line_item['Task Name'], 'ss_task_status':line_item['DCT Status']})
+                assignment_data[line_item['Task Name Primary']] = line_item['Task Status']
             self.ss_proj_list[sheet_i]['meta_data'] = meta_data
             self.ss_proj_list[sheet_i]['assignment_data'] = assignment_data
     def get_rmproj_metadata(self, proj):
@@ -555,19 +555,21 @@ class SmartsheetRmAdmin():
     def grab_rm_assignment_data(self, proj):
         '''grabs rm assignment data to check if any updates are needed'''
         rm_assignment_data = self.paginated_rm_getrequest(f"/api/v1/projects/{proj['rm_id']}/assignments")
-        rm_assignment_ids = []
+        rm_assignment_task_to_ids = {}
         for assignment in rm_assignment_data:
-            rm_assignment_ids.append(assignment['id'])
-        proj['rm_assignment_ids'] = rm_assignment_ids
+            # only adds to list if out of sync
+            if self.rm_to_ss_status_ids[assignment['status_option_id']] != proj['assignment_data'][assignment['description']]:
+                rm_assignment_task_to_ids[assignment['description']] = assignment['id']
+        proj['rm_assignment_task_to_ids'] = rm_assignment_task_to_ids
     def update_rm_assignments(self, proj):
         '''make updates to assignments, but matching the order in RM to the Order in SS and then mapping SS Task Name/Task Status to RM Assignment Description Work Status'''
-        for i, id in enumerate(proj['rm_assignment_ids']):
+        for assignment_key in proj['rm_assignment_task_to_ids']:
             data = {
-                'description':proj['assignment_data'][i]['ss_task_name'],
-                'status': proj['assignment_data'][i]['ss_task_status'],
+                'status_option_id': self.ss_to_rm_status_ids[proj['assignment_data'][assignment_key]],
             }
-            response = requests.put(f"https://api.rm.smartsheet.com/api/v1/assignments/{id}", headers=self.rm_header, data=json.dumps(data))
-            print(response.json())
+            response = requests.put(f"https://api.rm.smartsheet.com/api/v1/assignments/{proj['rm_assignment_task_to_ids'][assignment_key]}", headers=self.rm_header, data=json.dumps(data))
+            if response.status_code == 200:
+                self.log.log(f"{proj['name']} successfully updated its task {assignment_key} to a status of {proj['assignment_data'][assignment_key]}")
 
     #endregion
     #region post to ss
@@ -632,6 +634,7 @@ class SmartsheetRmAdmin():
         for proj in self.ss_proj_list:
             if proj['status'] == 'connected':
                 self.grab_rm_assignment_data(proj)
+                self.update_rm_assignments(proj)
 
 if __name__ == "__main__":
     # https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid is hh2 data sheet
@@ -642,13 +645,15 @@ if __name__ == "__main__":
         'hh2_data_sheetid': 1780078719487876,
         'hris_data_sheetid': 5956860349048708,
         'proj_workspace_id': 4883274435716996,
-        'proj_list_sheetid': 3858046490306436
+        'proj_list_sheetid': 3858046490306436,
+        'rm_to_ss_status_ids':{550725:'Planned', 550729:'Active', 550726:'Potential', 550730:'Completed', 684245:'Check-in', 684246:'Not Completed', 698235:'Blocked'},
+        'ss_to_rm_status_ids':{'Planned': 550725, 'Active':550729, 'Potential':550726, 'Completed':550730, 'Check-in':684245, 'Not Completed':684246, 'Blocked':698235}
         
     }
     sra = SmartsheetRmAdmin(config)
     sra.grab_rm_data()
     sra.run_proj_metadata_update()
-    # sra.run_hours_update()
+    sra.run_hours_update()
     sra.run_assignment_updates()
     sra.log.log("""~Fin
                      
