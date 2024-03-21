@@ -275,7 +275,8 @@ class grid:
 
         Parameters:
         - posting_data: Dictionary where each key is a column name and each value is the corresponding row value for that column.
-        - primary_key: A key from `posting_data` that serves as the reference to map row IDs to the posting data (must be case-sensitive match).
+        - primary_key: A key from `posting_data` that serves as the reference to map row IDs to the posting data (must be case-sensitive match). 
+            In otherwords, the primary_key is a str that matches one of the keys from the posting_data. This key represents the column that will be used to extract Row_IDs by finding the first row to match each posting_data's primary key value, and calling that the row Id for that dictionary
         - skip_nonmatch (optional, default=True): Determines the handling of non-matching primary keys. When set to `True`, rows with non-matching primary keys are ignored. When `False`, these rows are collected into a "new_rows" key in the resulting dictionary.  
 
         Process:
@@ -318,6 +319,7 @@ class grid:
 
         Parameters:
         - posting_data (list of dicts)
+        - primary_key (string which is equal to a key of one of the items in all dictionaries)
 
         Returns:
         None. Updates and possibly adds rows in the Smartsheet.
@@ -338,16 +340,18 @@ class grid:
                 new_row = smartsheet.models.Row()
                 new_row.id = row_id
                 for column_name in self.column_id_dict.keys():
-                    # Build new cell value
-                    new_cell = smartsheet.models.Cell()
-                    new_cell.column_id = int(self.column_id_dict[column_name])
-                    # stops error where post doesnt go through because value is "None"
-                    if self.update_data[row_id].get(column_name) != None:
-                        new_cell.value = self.update_data[row_id].get(column_name)
-                    else:
-                        new_cell.value = ""
-                    new_cell.strict = False
-                    new_row.cells.append(new_cell)
+                    # does not post repost primary key
+                    if column_name != primary_key:
+                        # Build new cell value
+                        new_cell = smartsheet.models.Cell()
+                        new_cell.column_id = int(self.column_id_dict[column_name])
+                        # stops error where post doesnt go through because value is "None"
+                        if self.update_data[row_id].get(column_name) != None:
+                            new_cell.value = self.update_data[row_id].get(column_name)
+                        else:
+                            new_cell.value = ""
+                        new_cell.strict = False
+                        new_row.cells.append(new_cell)
                 rows.append(new_row)
 
         # Update rows
