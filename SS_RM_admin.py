@@ -103,7 +103,6 @@ class SmartsheetRmAdmin():
         for row in data['rows']:
             for i, cell in enumerate(row['cells']):
                 if isinstance(cell.get('objectValue'), dict):
-                    print(cell.get('objectValue').get('name'), df['PRIMARY DCT'].tolist()[0])
                     if cell.get('objectValue').get('name') == df['PRIMARY DCT'].tolist()[0]:
                         return i
     def grab_rm_userids(self):
@@ -424,7 +423,7 @@ class SmartsheetRmAdmin():
             sheet_dict = df[df['Project'].notna()].to_dict('records')
             assignment_data = {}
             for line_item in sheet_dict:
-                assignment_data[line_item['Task Name Primary']] = line_item['Task Status']
+                assignment_data[line_item['Task Name - Primary']] = line_item['Task Status']
             self.ss_proj_list[sheet_i]['meta_data'] = meta_data
             self.ss_proj_list[sheet_i]['assignment_data'] = assignment_data
     def get_rmproj_metadata(self, proj):
@@ -558,7 +557,7 @@ class SmartsheetRmAdmin():
         rm_assignment_task_to_ids = {}
         for assignment in rm_assignment_data:
             # only adds to list if out of sync
-            if self.rm_to_ss_status_ids[assignment['status_option_id']] != proj['assignment_data'][assignment['description']]:
+            if self.rm_to_ss_status_ids.get(assignment.get('status_option_id')) != proj['assignment_data'].get(assignment.get('description')):
                 rm_assignment_task_to_ids[assignment['description']] = assignment['id']
         proj['rm_assignment_task_to_ids'] = rm_assignment_task_to_ids
     def update_rm_assignments(self, proj):
