@@ -563,12 +563,13 @@ class SmartsheetRmAdmin():
     def update_rm_assignments(self, proj):
         '''make updates to assignments, but matching the order in RM to the Order in SS and then mapping SS Task Name/Task Status to RM Assignment Description Work Status'''
         for assignment_key in proj['rm_assignment_task_to_ids']:
-            data = {
-                'status_option_id': self.ss_to_rm_status_ids.get(proj.get('assignment_data').get(assignment_key)),
-            }
-            response = requests.put(f"https://api.rm.smartsheet.com/api/v1/assignments/{proj['rm_assignment_task_to_ids'][assignment_key]}", headers=self.rm_header, data=json.dumps(data))
-            if response.status_code == 200:
-                self.log.log(f"{proj['name']} successfully updated its task {assignment_key} to a status of {proj['assignment_data'][assignment_key]}")
+            if assignment_key != '':
+                data = {
+                    'status_option_id': self.ss_to_rm_status_ids.get(proj.get('assignment_data').get(assignment_key)),
+                }
+                response = requests.put(f"https://api.rm.smartsheet.com/api/v1/assignments/{proj['rm_assignment_task_to_ids'][assignment_key]}", headers=self.rm_header, data=json.dumps(data))
+                if response.status_code == 200:
+                    self.log.log(f"{proj['name']} successfully updated its task {assignment_key} to a status of {proj['assignment_data'][assignment_key]}")
 
     #endregion
     #region post to ss
@@ -652,7 +653,7 @@ if __name__ == "__main__":
     sra = SmartsheetRmAdmin(config)
     sra.grab_rm_data()
     sra.run_proj_metadata_update()
-    sra.run_hours_update()
+    # sra.run_hours_update()
     sra.run_assignment_updates()
     sra.log.log("""~Fin
                      
