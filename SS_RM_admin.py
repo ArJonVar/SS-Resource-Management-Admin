@@ -653,7 +653,7 @@ if __name__ == "__main__":
     sra = SmartsheetRmAdmin(config)
     sra.grab_rm_data()
     sra.run_proj_metadata_update()
-    # sra.run_hours_update()
+    sra.run_hours_update()
     sra.run_assignment_updates()
     sra.log.log("""~Fin
                      
