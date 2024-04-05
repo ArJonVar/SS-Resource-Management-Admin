@@ -72,12 +72,15 @@ class SmartsheetRmAdmin():
                 self.log.log(f"Failed to fetch data: {response.status_code} - {response.reason}")
                 break  # Exit loop on failure
         return items if items else []
-    def convert_date_format(self, original_date):
-        '''converst YEAR-0DAY-0MONTH to day/month/year'''
+    def convert_date_format(self, original_date, ss_format = False):
+        '''converst YEAR-0DAY-0MONTH to day/month/year, SS_format refers to how it shows up in SS for making corresponding strings (with leading zeros and 2 digit years)'''
         year, month, day = original_date.split('-')
-        month = str(int(month))  # Remove leading zero
-        day = str(int(day))  # Remove leading zero
-        return f"{month}/{day}/{year}"
+        if ss_format:
+            return f"{month}/{day}/{str(year)[2:]}"
+        else:
+            month = str(int(month))  # Remove leading zero
+            day = str(int(day))  # Remove leading zero
+            return f"{month}/{day}/{year}"
     def generate_now_string(self):
         '''generates now string for psoting'''
         now = datetime.now()
@@ -115,11 +118,12 @@ class SmartsheetRmAdmin():
         self.email_to_userid={}
         self.email_to_sageid = {}
         for user in response_dict:
-            self.rm_user_list.append({'email': user['email'].lower(), 'rm_usr_id':  user['id'], 'name': user['display_name'], 'sage id': user['employee_number']})
-            self.sageid_to_email[user['employee_number']] = user['email'].lower()
-            self.email_to_sageid[user['email'].lower()] = user['employee_number']
-            self.userid_to_email[user['id']] = user['email'].lower()
-            self.email_to_userid[user['email'].lower()] = user['id']
+            if user['email'] is not None:
+                self.rm_user_list.append({'email': user['email'].lower(), 'rm_usr_id':  user['id'], 'name': user['display_name'], 'sage id': user['employee_number']})
+                self.sageid_to_email[user['employee_number']] = user['email'].lower()
+                self.email_to_sageid[user['email'].lower()] = user['employee_number']
+                self.userid_to_email[user['id']] = user['email'].lower()
+                self.email_to_userid[user['email'].lower()] = user['id']
     def grab_rm_projids(self):
         '''grabs each project's id from RM in SS, also makes dict that can translate rm_id to job number for time & expense'''
         response_dict = self.paginated_rm_getrequest(endpoint='/api/v1/projects?sort_field=created&sort_order=ascending&with_archived=true')
@@ -421,11 +425,13 @@ class SmartsheetRmAdmin():
             sheet_grid.fetch_content()
             df = sheet_grid.df
             sheet_dict = df[df['Project'].notna()].to_dict('records')
-            assignment_data = {}
+            ss_assignment_data = {}
             for line_item in sheet_dict:
-                assignment_data[line_item['Task Name - Primary']] = line_item['Task Status']
+                if line_item['Task Name - Backend Key'] is not None:
+                    print(line_item['Task Name - Backend Key']) 
+                    ss_assignment_data[line_item['Task Name - Backend Key']] = line_item['Task Status']
             self.ss_proj_list[sheet_i]['meta_data'] = meta_data
-            self.ss_proj_list[sheet_i]['assignment_data'] = assignment_data
+            self.ss_proj_list[sheet_i]['ss_assignment_data'] = ss_assignment_data
     def get_rmproj_metadata(self, proj):
         '''checks connected projects for sync of meta data (checking standard, and non standard Arch and Proj Enum fields seperatly), and compares. If out of sync, sounds to api call'''
         endpoint = f"/api/v1/projects/{proj['rm_id']}"
@@ -551,15 +557,35 @@ class SmartsheetRmAdmin():
         #endregion
     #endregion
     #region Assignments
+    
     def grab_rm_assignment_data(self, proj):
         '''grabs rm assignment data to check if any updates are needed'''
-        rm_assignment_data = self.paginated_rm_getrequest(f"/api/v1/projects/{proj['rm_id']}/assignments")
+        rm_assignment_data_raw = self.paginated_rm_getrequest(f"/api/v1/projects/{proj['rm_id']}/assignments")
+        rm_assignment_data = []
         rm_assignment_task_to_ids = {}
-        for assignment in rm_assignment_data:
+        ss_assignment_to_new_status = {}
+        for assignment in rm_assignment_data_raw:
+            task_name = assignment.get('description')
+            rm_status_id = assignment.get('status_option_id')
+            rm_status = self.rm_to_ss_status_ids.get(rm_status_id) 
+            rm_task_name_backend_key = task_name + "|" + str(round(assignment.get('percent'), 1)) + "|" +  str(self.convert_date_format(assignment.get('starts_at'), True)) + "|" + str(self.convert_date_format(assignment.get('ends_at'), True))
+            print(rm_task_name_backend_key)
+            rm_assignment_data.append({rm_task_name_backend_key:rm_status})
+            ss_status = proj['ss_assignment_data'].get(rm_task_name_backend_key)
             # only adds to list if out of sync
-            if self.rm_to_ss_status_ids.get(assignment.get('status_option_id')) != proj['assignment_data'].get(assignment.get('description')):
-                rm_assignment_task_to_ids[assignment['description']] = assignment['id']
+            if rm_status != ss_status:
+                print("rm: ", rm_status, "ss: ", ss_status)
+                # if RM is empty, posts to RM
+                if rm_status == None:
+                    rm_assignment_task_to_ids[task_name] = assignment['id']
+                # else post to SS
+                else:
+                    ss_assignment_to_new_status[task_name] = ss_status
+        print("rm: ", rm_assignment_task_to_ids, "ss: ", ss_assignment_to_new_status)
+        proj['rm_assignment_data'] = rm_assignment_data
         proj['rm_assignment_task_to_ids'] = rm_assignment_task_to_ids
+        proj['ss_assignment_to_new_status'] = ss_assignment_to_new_status
+
     def update_rm_assignments(self, proj):
         '''make updates to assignments, but matching the order in RM to the Order in SS and then mapping SS Task Name/Task Status to RM Assignment Description Work Status'''
         for assignment_key in proj['rm_assignment_task_to_ids']:
@@ -569,7 +595,11 @@ class SmartsheetRmAdmin():
                 }
                 response = requests.put(f"https://api.rm.smartsheet.com/api/v1/assignments/{proj['rm_assignment_task_to_ids'][assignment_key]}", headers=self.rm_header, data=json.dumps(data))
                 if response.status_code == 200:
-                    self.log.log(f"{proj['name']} successfully updated its task {assignment_key} to a status of {proj['assignment_data'][assignment_key]}")
+                    try:
+                        self.log.log(f"{proj['name']} successfully updated its task {assignment_key} to a status of {proj['assignment_data'][assignment_key]}")
+                    except KeyError:
+                        self.log.log(f"error posting success message (ironic, I know!) for project: {proj['name']} task: {assignment_key}")
+
 
     #endregion
     #region post to ss
@@ -631,10 +661,21 @@ class SmartsheetRmAdmin():
         '''assignments in rm are linked to users and projects and are line-item tasks in ss per project'''
         self.log.log("""Project Assignment Updates:
                      """)
-        for proj in self.ss_proj_list:
-            if proj['status'] == 'connected':
-                self.grab_rm_assignment_data(proj)
-                self.update_rm_assignments(proj)
+        try:    
+            for proj in self.ss_proj_list:
+                if proj['status'] == 'connected':
+                    self.grab_rm_assignment_data(proj)
+                    # self.update_rm_assignments(proj)
+        except AttributeError:
+            self.grab_proj_sheetids()
+            self.establish_sheet_connection()
+            tot = len(self.ss_proj_list)
+            for proj_i, proj in enumerate(self.ss_proj_list):
+                self.log.log(f"{proj_i+1}/{tot}  Assessing {proj['name']}...")
+                self.grab_connected_sheet_data(proj_i, proj)
+                if proj['status'] == 'connected':
+                    self.grab_rm_assignment_data(proj)
+                    # self.update_rm_assignments(proj)
 
 if __name__ == "__main__":
     # https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid is hh2 data sheet
@@ -658,3 +699,4 @@ if __name__ == "__main__":
     sra.log.log("""~Fin
                      
                 """)
+    
