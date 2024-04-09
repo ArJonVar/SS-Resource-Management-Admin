@@ -145,7 +145,27 @@ class SmartsheetRmAdmin():
                     pass
 
                 self.rm_proj_list.append({'project name':proj['name'],  'job number':proj['project_code'], 'rm_proj_id':proj['id']})
-                self.rm_id_to_jobnum[proj['id']] = proj['project_code']
+                self.rm_id_to_jobnum[proj['id']] = proj['project_code']  
+    def custom_round(self, n, digits):
+        '''python does not round as I'd expect and it needs to be a perfect match with the round on SS so had to make custom (using chatGPT)'''
+        # Scale the number to keep the part we're interested in as an integer.
+        scaled = n * (10 ** digits)
+        floor_scaled = int(scaled)  # Get the floor value of the scaled number.
+        diff = scaled - floor_scaled  # Difference between the scaled number and its floor.
+
+        # If the difference is exactly 0.5, we round up.
+        if diff == 0.5:
+            result = (floor_scaled + 1) / (10 ** digits)
+        else:
+            # For other cases, we rely on the built-in round.
+            result = round(n, digits)
+
+        # If result is of type float and is an integer, return it as an int type.
+        if isinstance(result, float) and result.is_integer():
+            return int(result)
+        else:
+            return result
+
     #endregion
     #region Time & Expense
         #region remedy no sage id
@@ -428,8 +448,9 @@ class SmartsheetRmAdmin():
             ss_assignment_data = {}
             for line_item in sheet_dict:
                 if line_item['Task Name - Backend Key'] is not None:
-                    print(line_item['Task Name - Backend Key']) 
+                    # print("SS KEY: ", line_item['Task Name - Backend Key']) 
                     ss_assignment_data[line_item['Task Name - Backend Key']] = line_item['Task Status']
+            self.ss_proj_list[sheet_i]['sheet_grid_obj'] = sheet_grid 
             self.ss_proj_list[sheet_i]['meta_data'] = meta_data
             self.ss_proj_list[sheet_i]['ss_assignment_data'] = ss_assignment_data
     def get_rmproj_metadata(self, proj):
@@ -562,45 +583,34 @@ class SmartsheetRmAdmin():
         '''grabs rm assignment data to check if any updates are needed'''
         rm_assignment_data_raw = self.paginated_rm_getrequest(f"/api/v1/projects/{proj['rm_id']}/assignments")
         rm_assignment_data = []
-        rm_assignment_task_to_ids = {}
-        ss_assignment_to_new_status = {}
+        ss_assignment_to_new_status = []
+        assignment_update_message = {}
+        need_to_update = False
         for assignment in rm_assignment_data_raw:
             task_name = assignment.get('description')
             rm_status_id = assignment.get('status_option_id')
             rm_status = self.rm_to_ss_status_ids.get(rm_status_id) 
-            rm_task_name_backend_key = task_name + "|" + str(round(assignment.get('percent'), 1)) + "|" +  str(self.convert_date_format(assignment.get('starts_at'), True)) + "|" + str(self.convert_date_format(assignment.get('ends_at'), True))
-            print(rm_task_name_backend_key)
+            rm_task_name_backend_key = task_name + "|" + str(self.custom_round(assignment.get('percent'), 1)) + "|" +  str(self.convert_date_format(assignment.get('starts_at'), True)) + "|" + str(self.convert_date_format(assignment.get('ends_at'), True))
             rm_assignment_data.append({rm_task_name_backend_key:rm_status})
             ss_status = proj['ss_assignment_data'].get(rm_task_name_backend_key)
             # only adds to list if out of sync
-            if rm_status != ss_status:
-                print("rm: ", rm_status, "ss: ", ss_status)
-                # if RM is empty, posts to RM
-                if rm_status == None:
-                    rm_assignment_task_to_ids[task_name] = assignment['id']
-                # else post to SS
-                else:
-                    ss_assignment_to_new_status[task_name] = ss_status
-        print("rm: ", rm_assignment_task_to_ids, "ss: ", ss_assignment_to_new_status)
+            if rm_status != ss_status and task_name != '':
+                ss_assignment_to_new_status.append({'Task Status':rm_status, 'Task Name - Backend Key':rm_task_name_backend_key})
+                assignment_update_message[task_name] = rm_status
+        if assignment_update_message != {}:
+            need_to_update = True
+            self.log.log(f"changes to be made in ss: {assignment_update_message}")
         proj['rm_assignment_data'] = rm_assignment_data
-        proj['rm_assignment_task_to_ids'] = rm_assignment_task_to_ids
         proj['ss_assignment_to_new_status'] = ss_assignment_to_new_status
 
-    def update_rm_assignments(self, proj):
-        '''make updates to assignments, but matching the order in RM to the Order in SS and then mapping SS Task Name/Task Status to RM Assignment Description Work Status'''
-        for assignment_key in proj['rm_assignment_task_to_ids']:
-            if assignment_key != '':
-                data = {
-                    'status_option_id': self.ss_to_rm_status_ids.get(proj.get('assignment_data').get(assignment_key)),
-                }
-                response = requests.put(f"https://api.rm.smartsheet.com/api/v1/assignments/{proj['rm_assignment_task_to_ids'][assignment_key]}", headers=self.rm_header, data=json.dumps(data))
-                if response.status_code == 200:
-                    try:
-                        self.log.log(f"{proj['name']} successfully updated its task {assignment_key} to a status of {proj['assignment_data'][assignment_key]}")
-                    except KeyError:
-                        self.log.log(f"error posting success message (ironic, I know!) for project: {proj['name']} task: {assignment_key}")
-
-
+        return need_to_update
+    def update_assignments_in_ss(self, update, proj):
+        '''runs the updates, it just uses the grid class to do the update, but due to error handleing, I put in its own function'''
+        if update:
+            try:
+                proj['sheet_grid_obj'].update_rows(proj['ss_assignment_to_new_status'], 'Task Name - Backend Key')
+            except ApiError:
+                self.log.log(f'updating the {proj["name"]} assignments failed')
     #endregion
     #region post to ss
     def post_ss_data(self, data):
@@ -664,8 +674,8 @@ class SmartsheetRmAdmin():
         try:    
             for proj in self.ss_proj_list:
                 if proj['status'] == 'connected':
-                    self.grab_rm_assignment_data(proj)
-                    # self.update_rm_assignments(proj)
+                    update = self.grab_rm_assignment_data(proj)
+                    self.update_assignments_in_ss(update,proj)            
         except AttributeError:
             self.grab_proj_sheetids()
             self.establish_sheet_connection()
@@ -674,9 +684,8 @@ class SmartsheetRmAdmin():
                 self.log.log(f"{proj_i+1}/{tot}  Assessing {proj['name']}...")
                 self.grab_connected_sheet_data(proj_i, proj)
                 if proj['status'] == 'connected':
-                    self.grab_rm_assignment_data(proj)
-                    # self.update_rm_assignments(proj)
-
+                    update = self.grab_rm_assignment_data(proj)
+                    self.update_assignments_in_ss(update,proj)
 if __name__ == "__main__":
     # https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid is hh2 data sheet
     # https://app.smartsheet.com/browse/workspaces/GXmwRM4wcCmjMVGVjhJ2cWCFR9QWMQCr5w8WGrx1 is proj workspace
@@ -687,9 +696,7 @@ if __name__ == "__main__":
         'hris_data_sheetid': 5956860349048708,
         'proj_workspace_id': 4883274435716996,
         'proj_list_sheetid': 3858046490306436,
-        'rm_to_ss_status_ids':{550725:'Planned', 550729:'Active', 550726:'Potential', 550730:'Completed', 684245:'Check-in', 684246:'Not Completed', 698235:'Blocked'},
-        'ss_to_rm_status_ids':{'Planned': 550725, 'Active':550729, 'Potential':550726, 'Completed':550730, 'Check-in':684245, 'Not Completed':684246, 'Blocked':698235}
-        
+        'rm_to_ss_status_ids':{550725:'Planned', 550729:'Active', 550726:'Potential', 550730:'Completed', 684245:'Check-in', 684246:'Not Completed', 698235:'Blocked'}
     }
     sra = SmartsheetRmAdmin(config)
     sra.grab_rm_data()
