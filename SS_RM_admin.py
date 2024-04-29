@@ -215,7 +215,7 @@ class SmartsheetRmAdmin():
         df = sheet.df
         self.scriptkey_to_script_message = pd.Series(df['Script Message'].values,index=df['Script Key']).to_dict()
 
-        df = df.drop(['Script Message', 'Script Key',  'Repeater Key', 'Message Repeater', 'Formatter'], axis=1)
+        df = df.drop(['Script Message', 'Script Key', 'Repeater Key', 'Message Repeater', 'Formatter', 'Approved As', 'Approved By', 'Timestamp', 'Level', 'Resulting Approval Type'], axis=1)
 
         invalid_column_list = self.validate_and_contains_first_row(df)
 
@@ -238,13 +238,14 @@ class SmartsheetRmAdmin():
         '''filteres by approval type, then turns the df into a dict w recrds, 
         making sure to add all units incase there are two entries for the same day/job number'''
         # Chat GPT helped me with this to make it run faster:
-        grouped = df[df['ApprovalType'] == 'Sealed'].groupby(
-        ['Job', 'Date', 'EmployeeNumber']
+        grouped = df[df['ApprovalType'].isin(['Sealed', None])].groupby(
+            ['Job', 'Date', 'EmployeeNumber']
         ).agg({
             'Units': 'sum',
             'Description': lambda x: ' '.join(x),
             'CostCodeName': lambda x: ' | '.join(x)
         }).reset_index()
+
         
         # Assuming EmployeeNumber to email mapping is preprocessed if possible
         # For direct transformation without .iterrows()
