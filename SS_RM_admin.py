@@ -290,7 +290,11 @@ class SmartsheetRmAdmin():
         for user in self.rm_user_list:
             self.current_rm_timedata.extend(sra.paginated_rm_getrequest(f"/api/v1/users/{user['rm_usr_id']}/time_entries"))
         for timeentry in self.current_rm_timedata:
-            timeentry['job_num'] = self.rm_id_to_jobnum[timeentry['assignable_id']]
+            try:
+                timeentry['job_num'] = self.rm_id_to_jobnum[timeentry['assignable_id']]
+            except KeyError:
+                # not longterm solution!
+                timeentry['job_num'] = "no_job_num"
             timeentry['usr_email'] = self.userid_to_email[timeentry['user_id']]
             key = f"{timeentry['usr_email'].lower()}{timeentry['date']}{timeentry['job_num']}"
             if key not in self.rm_quickreference_hrs:
