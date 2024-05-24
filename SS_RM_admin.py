@@ -215,7 +215,7 @@ class SmartsheetRmAdmin():
         df = sheet.df
         self.scriptkey_to_script_message = pd.Series(df['Script Message'].values,index=df['Script Key']).to_dict()
 
-        df = df.drop(['Script Message', 'Script Key', 'Repeater Key', 'Message Repeater', 'Formatter', 'Approved As', 'Approved By', 'Timestamp', 'Level', 'Resulting Approval Type'], axis=1)
+        df = df.drop(['Script Message', 'Script Key', 'Repeater Key', 'Message Repeater', 'Formatter', 'Approved As', 'Approved By', 'Timestamp', 'Level', 'Resulting Approval Type', 'Created'], axis=1)
 
         invalid_column_list = self.validate_and_contains_first_row(df)
 
@@ -225,6 +225,7 @@ class SmartsheetRmAdmin():
         else: 
             self.error_w_hh2sheet.append(f"First row validation failed (so script did not run properly). Please check {invalid_column_list} columns. ({self.generate_now_string()})")
             self.log.log(f'HH2 Sheet error: please check the following column(s) {invalid_column_list} at https://app.smartsheet.com/sheets/GffHvGGxVJwQ9P8w8gwgfqrmJjcq39JXvMQmH7q1?view=grid&filterId=3306346053062532')
+            self.log.log('if this is a new column, add it to df.drop in fetch_and_prepare_hh2_data(self)')
             return None  # Return to avoid further processing
     def clean_df_for_processing(self, df):
         '''cleans incoming hh2 data from smartsheet'''
@@ -629,7 +630,7 @@ class SmartsheetRmAdmin():
                 self.posting_data.append({"Script Key":row['key'], 'Script Message':new_message})
         self.posting_data.insert(0, {"Script Key":"EmployeeNumberDateJobApprovalType", 'Script Message':""})
         sheet = grid(self.hh2_data_sheetid)
-        sheet.update_rows(self.posting_data, "Script Key")
+        sheet.update_rows(posting_data = self.posting_data, primary_key = "Script Key", update_type = "batch")
     #endregion
 
     def grab_rm_data(self):
