@@ -218,7 +218,7 @@ class SmartsheetRmAdmin():
         columns_to_keep = [
             'EmployeeNumber', 'EmployeeName', 'Date', 'PayrollGroup', 'PayrollServiceId',
             'Job', 'JobName', 'CostCode', 'CostCodeName', 'CertifiedClass', 'CertifiedClassName',
-            'PayType', 'PayTypeName', 'Units', 'Description', 'ApprovalType'
+            'PayType', 'PayTypeName', 'Units', 'Description', 'ApprovalType', 'id'
         ]
         df = df.filter(columns_to_keep)
 
