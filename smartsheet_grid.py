@@ -336,36 +336,6 @@ class grid:
 
         if update_type =='debug':
             # Handle existing rows' updates (printing each row)
-            for row_id in self.update_data.keys():
-                if row_id != "new_rows":
-                    # Build the row to update
-                    new_row = smartsheet.models.Row()
-                    new_row.id = row_id
-                    for column_name in self.column_id_dict.keys():
-                        # does not post repost primary key
-                        if column_name != primary_key:
-                            # Build new cell value
-                            new_cell = smartsheet.models.Cell()
-                            new_cell.column_id = int(self.column_id_dict[column_name])
-                            # stops error where post doesnt go through because value is "None"
-                            if self.update_data[row_id].get(column_name) != None:
-                                print(self.update_data[row_id].get(column_name))
-                                new_cell.value = self.update_data[row_id].get(column_name)
-                            else:
-                                new_cell.value = ""
-                            new_cell.strict = False
-                            new_row.cells.append(new_cell)
-
-                    # Update rows
-                    self.update_response = self.smart.Sheets.update_rows(
-                      posting_sheet_id ,      # sheet_id
-                      [new_row])
-                    
-        elif update_type =='batch':
-            # Handle existing rows' updates (printing each row)
-            rows = []
-            counter = 1
-            batch_tot = int(math.ceil(len(self.update_data.keys())/350))
             for i, row_id in enumerate(self.update_data.keys()):
                 if row_id != "new_rows":
                     # Build the row to update
@@ -379,26 +349,57 @@ class grid:
                             new_cell.column_id = int(self.column_id_dict[column_name])
                             # stops error where post doesnt go through because value is "None"
                             if self.update_data[row_id].get(column_name) != None:
+                                print(f"{i+1}/{len(self.update_data.keys())}  ", self.update_data[row_id].get(column_name))
                                 new_cell.value = self.update_data[row_id].get(column_name)
                             else:
                                 new_cell.value = ""
                             new_cell.strict = False
                             new_row.cells.append(new_cell)
 
-                if i % 350 == 0 and i != 0:
                     # Update rows
                     self.update_response = self.smart.Sheets.update_rows(
-                        posting_sheet_id ,      # sheet_id
-                        [new_row])
-                    print(f"Batch {counter}/{batch_tot}: updated {i}/{len(self.update_data.keys())} in smartsheet")
-                    time.sleep(2)
+                      posting_sheet_id ,      # sheet_id
+                      [new_row])
+                    
+        elif update_type == 'batch':
+            rows = []
+            counter = 1
+            batch_total = int(math.ceil(len(self.update_data.keys()) / 350))
+            self.update_response = []       
+
+            for i, row_id in enumerate(self.update_data.keys()):
+                if row_id != "new_rows":
+                    new_row = smartsheet.models.Row()
+                    new_row.id = row_id
+                    for column_name in self.column_id_dict.keys():
+                        if column_name != primary_key:
+                            new_cell = smartsheet.models.Cell()
+                            new_cell.column_id = int(self.column_id_dict[column_name])
+                            new_cell.value = self.update_data[row_id].get(column_name, "")  # Use get method to handle None
+                            new_cell.strict = False
+                            new_row.cells.append(new_cell)
+                    rows.append(new_row)  # Properly add the new_row to the rows list       
+
+                # When 350 rows are collected or at the end of the data
+                if (i + 1) % 350 == 0 or (i + 1) == len(self.update_data.keys()):
+                    # Send the batch update
+                    self.update_response.append(self.smart.Sheets.update_rows(
+                        posting_sheet_id,
+                        rows  # Now passing the entire list of rows
+                    ))
+                    print(f"Batch {counter}/{batch_total}: updated {i + 1}/{len(self.update_data.keys())} in smartsheet")
+                    time.sleep(2)  # Optional: sleep to avoid hitting rate limits or as needed
                     counter += 1
-                    rows = []
-            
-            print(f"Batch {counter}/{batch_tot}: updated {i + 1}/{len(self.update_data.keys())} in smartsheet")
-            self.update_response = self.smart.Sheets.update_rows(
-                posting_sheet_id ,      # sheet_id
-                [new_row])
+                    rows = []  # Reset the rows list for the next batch     
+
+            # After the loop, check if there's any leftover rows to update
+            if rows:
+                self.update_response.append(self.smart.Sheets.update_rows(
+                    posting_sheet_id,
+                    rows
+                ))
+                print(f"Final batch: updated remaining {len(rows)} rows in smartsheet")
+
         
         elif update_type == 'default':
             rows = []
