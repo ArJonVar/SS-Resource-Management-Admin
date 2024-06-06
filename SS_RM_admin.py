@@ -215,7 +215,12 @@ class SmartsheetRmAdmin():
         df = sheet.df
         self.scriptkey_to_script_message = pd.Series(df['Script Message'].values,index=df['Script Key']).to_dict()
 
-        df = df.drop(['Script Message', 'Script Key', 'Repeater Key', 'Message Repeater', 'Formatter', 'Approved As', 'Approved By', 'Timestamp', 'Level', 'Resulting Approval Type', 'Created'], axis=1)
+        columns_to_keep = [
+            'EmployeeNumber', 'EmployeeName', 'Date', 'PayrollGroup', 'PayrollServiceId',
+            'Job', 'JobName', 'CostCode', 'CostCodeName', 'CertifiedClass', 'CertifiedClassName',
+            'PayType', 'PayTypeName', 'Units', 'Description', 'ApprovalType'
+        ]
+        df = df.filter(columns_to_keep)
 
         invalid_column_list = self.validate_and_contains_first_row(df)
 
