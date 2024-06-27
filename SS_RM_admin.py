@@ -671,8 +671,14 @@ class SmartsheetRmAdmin():
             self.log.log(f"{proj_i+1}/{tot}  Assessing {proj['name']}...")
             self.update_sheet_name(proj)
             if proj['status'] == 'connected':
-                self.grab_connected_sheet_data(proj_i, proj)
+                try:
+                    time.sleep(4)
+                    self.grab_connected_sheet_data(proj_i, proj)
+                except KeyError:
+                    self.log.log(f"unknown error @{proj_i}, {proj}, skipping this project for now")
+                
                 rm_proj_metadata = self.get_rmproj_metadata(proj)
+                
                 try:
                     self.execute_conditional_rm_proj_update(rm_proj_metadata, proj)
                 except:
