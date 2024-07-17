@@ -620,6 +620,8 @@ class SmartsheetRmAdmin():
         if update:
             try:
                 proj['sheet_grid_obj'].update_rows(proj['ss_assignment_to_new_status'], 'Task Name - Backend Key')
+            except ValueError:
+                self.log.log(f'row update failed b/c row was missing from {proj["name"]} Smartsheet')
             except ApiError:
                 self.log.log(f'updating the {proj["name"]} assignments failed')
     #endregion
@@ -708,7 +710,7 @@ if __name__ == "__main__":
     # https://app.smartsheet.com/browse/workspaces/GXmwRM4wcCmjMVGVjhJ2cWCFR9QWMQCr5w8WGrx1 is proj workspace
     config = {
         'smartsheet_token':smartsheet_token,
-        'rm_token':rm_token,
+        'rm_token': rm_token,
         'hh2_data_sheetid': 1780078719487876,
         'hris_data_sheetid': 5956860349048708,
         'proj_workspace_id': 4883274435716996,
