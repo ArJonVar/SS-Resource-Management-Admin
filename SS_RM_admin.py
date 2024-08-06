@@ -125,7 +125,8 @@ class SmartsheetRmAdmin():
                 self.userid_to_email[user['id']] = user['email'].lower()
                 self.email_to_userid[user['email'].lower()] = user['id']
     def grab_rm_projids(self):
-        '''grabs each project's id from RM in SS, also makes dict that can translate rm_id to job number for time & expense'''
+        '''grabs each project's id from RM in SS, also makes dict that can translate rm_id to job number for time & expense
+        I added the "orange" "leavetype" projects from rm so I need to append those to the objects so they are added 8.5.24'''
         response_dict = self.paginated_rm_getrequest(endpoint='/api/v1/projects?sort_field=created&sort_order=ascending&with_archived=true')
 
         self.rm_proj_list=[]
@@ -146,6 +147,14 @@ class SmartsheetRmAdmin():
 
                 self.rm_proj_list.append({'project name':proj['name'],  'job number':proj['project_code'], 'rm_proj_id':proj['id']})
                 self.rm_id_to_jobnum[proj['id']] = proj['project_code']  
+
+        self.rm_proj_list.append({'project name':'PTO',  'job number':'PTO', 'rm_proj_id':self.rm_leave_type_ids["Vacation"]})
+        self.rm_id_to_jobnum[self.rm_leave_type_ids["Vacation"]] = 'PTO'
+        self.jobnum_to_rm_id['PTO'] = self.rm_leave_type_ids["Vacation"]
+        self.rm_proj_list.append({'project name':'Parental Leave',  'job number':'PARELEAVE', 'rm_proj_id':self.rm_leave_type_ids["Parental Leave"]})
+        self.rm_id_to_jobnum[self.rm_leave_type_ids["Parental Leave"]] = 'PARELEAVE'  
+        self.jobnum_to_rm_id[proj['project_code']] = proj['id']
+        self.jobnum_to_rm_id['PARELEAVE'] = self.rm_leave_type_ids["Parental Leave"]
     def custom_round(self, n, digits):
         '''python does not round as I'd expect and it needs to be a perfect match with the round on SS so had to make custom (using chatGPT)'''
         # Scale the number to keep the part we're interested in as an integer.
@@ -209,7 +218,8 @@ class SmartsheetRmAdmin():
             self.grab_rm_userids()
         #endregion 
     def fetch_and_prepare_hh2_data(self):
-        '''grabs the hh2 data from ss, then cleans the df and creates a list of dict records'''
+        '''grabs the hh2 data from ss, then cleans the df and creates a list of dict records
+        I have to replace Jobs with resulting Jobs because Katherine added jobs that are the results of certain data conditions, not from hh2 8.5.24'''
         sheet = grid(self.hh2_data_sheetid)
         sheet.fetch_content()
         df = sheet.df
@@ -220,6 +230,7 @@ class SmartsheetRmAdmin():
             'Job', 'JobName', 'CostCode', 'CostCodeName', 'CertifiedClass', 'CertifiedClassName',
             'PayType', 'PayTypeName', 'Units', 'Description', 'ApprovalType', 'id'
         ]
+        df['Job'] = df['Resulting Job Number']
         df = df.filter(columns_to_keep)
 
         invalid_column_list = self.validate_and_contains_first_row(df)
@@ -241,18 +252,28 @@ class SmartsheetRmAdmin():
         df['Units'] = pd.to_numeric(df['Units'], errors='coerce')
         return df
     def aggregate_hh2_data(self, df):
-        '''filteres by approval type, then turns the df into a dict w recrds, 
-        making sure to add all units incase there are two entries for the same day/job number'''
-        # Chat GPT helped me with this to make it run faster:
-        grouped = df[df['ApprovalType'].isin(['Sealed', None])].groupby(
+        '''Filter by approval type, then turn the df into a dict with records,
+        making sure to add all units in case there are two entries for the same day/job number'''
+        
+        # Filter the DataFrame
+        filtered_df = df[df['ApprovalType'].isin(['Sealed', None])]
+    
+        # Select only the necessary columns for aggregation
+        columns_to_aggregate = ['Job', 'Date', 'EmployeeNumber', 'Units', 'Description', 'CostCodeName']
+        filtered_df = filtered_df[columns_to_aggregate]
+        
+        # Replace None with empty strings in 'Description' and 'CostCodeName' columns
+        filtered_df['Description'] = filtered_df['Description'].fillna('')
+        filtered_df['CostCodeName'] = filtered_df['CostCodeName'].fillna('')
+    
+        grouped = filtered_df.groupby(
             ['Job', 'Date', 'EmployeeNumber']
         ).agg({
             'Units': 'sum',
             'Description': lambda x: ' '.join(x),
             'CostCodeName': lambda x: ' | '.join(x)
         }).reset_index()
-
-        
+    
         # Assuming EmployeeNumber to email mapping is preprocessed if possible
         # For direct transformation without .iterrows()
         grouped['user'] = grouped['EmployeeNumber'].map(self.sageid_to_email).fillna('default_email@example.com')
@@ -261,15 +282,15 @@ class SmartsheetRmAdmin():
             lambda x: str(int(self.email_to_userid.get(x.lower()))) if self.email_to_userid.get(x.lower()) is not None else None
         )
         grouped['rm_proj_id'] = grouped['Job'].apply(lambda x: self.jobnum_to_rm_id.get(x, ''))
-
+    
         # Calculate min and max dates
         self.min_date = grouped['date'].min()
         self.max_date = grouped['date'].max()
-        
+    
         # Directly construct the records without explicit row iteration
         records = grouped.to_dict('records')
         self.records = records
-        
+    
         # Transform records into desired format
         flat_hh2_records = [{
             "user_email": record['user'],
@@ -281,7 +302,7 @@ class SmartsheetRmAdmin():
             "task": record['CostCodeName'],
             "notes": record.get('Description'),
             # "ss_row_id": record['id'],
-            "key" : f"{self.email_to_sageid.get(record['user'])}{self.convert_date_format(record['date'])}{record['Job']}Sealed",
+            "key": f"{self.email_to_sageid.get(record['user'])}{self.convert_date_format(record['date'])}{record['Job']}Sealed",
             "messages": []
         } for record in records]
     
@@ -294,7 +315,7 @@ class SmartsheetRmAdmin():
         self.rm_quickreference_hrs = {}
         self.rm_quickreference_id = {}
         for user in self.rm_user_list:
-            self.current_rm_timedata.extend(sra.paginated_rm_getrequest(f"/api/v1/users/{user['rm_usr_id']}/time_entries"))
+            self.current_rm_timedata.extend(self.paginated_rm_getrequest(f"/api/v1/users/{user['rm_usr_id']}/time_entries"))
         for timeentry in self.current_rm_timedata:
             try:
                 timeentry['job_num'] = self.rm_id_to_jobnum[timeentry['assignable_id']]
@@ -405,7 +426,6 @@ class SmartsheetRmAdmin():
         else:
             # returns false because no proj_id which means could not post. The error was caught and documented in process_timedata_discrepencies()
             return False
-        #end region
         #endregion
     #endregion
     #region Project Syncing
