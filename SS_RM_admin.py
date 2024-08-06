@@ -735,7 +735,8 @@ if __name__ == "__main__":
         'hris_data_sheetid': 5956860349048708,
         'proj_workspace_id': 4883274435716996,
         'proj_list_sheetid': 3858046490306436,
-        'rm_to_ss_status_ids':{550725:'Planned', 550729:'Active', 550726:'Potential', 550730:'Completed', 684245:'Check-in', 684246:'Not Completed', 698235:'Blocked'}
+        'rm_to_ss_status_ids':{550725:'Planned', 550729:'Active', 550726:'Potential', 550730:'Completed', 684245:'Check-in', 684246:'Not Completed', 698235:'Blocked'},
+        'rm_leave_type_ids':{"Vacation":8616592, "Sick":8616593, "Parental Leave":8616594}
     }
     sra = SmartsheetRmAdmin(config)
     sra.grab_rm_data()
