@@ -277,6 +277,10 @@ class SmartsheetRmAdmin():
         # Assuming EmployeeNumber to email mapping is preprocessed if possible
         # For direct transformation without .iterrows()
         grouped['user'] = grouped['EmployeeNumber'].map(self.sageid_to_email).fillna('default_email@example.com')
+
+        # Filter out rows where 'user' is 'default_email@example.com'
+        grouped = grouped[grouped['user'] != 'default_email@example.com']
+
         grouped['date'] = pd.to_datetime(grouped['Date']).dt.date.astype(str)  # Ensuring date format
         grouped['rm_user_id'] = grouped['user'].apply(
             lambda x: str(int(self.email_to_userid.get(x.lower()))) if self.email_to_userid.get(x.lower()) is not None else None
